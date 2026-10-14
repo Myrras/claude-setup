@@ -1,0 +1,5 @@
+{
+  "name": "robbieminderhoud",
+  "owner": { "name": "RobbieMinderhoud" },
+  "plugins": [{ "name": "orchestrator-mode", "source": "./", "description": "Main session orchestrates and verifies; subagents make every change." }]
+}
