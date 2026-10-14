@@ -17,33 +17,48 @@ claude plugin install orchestrator-mode@robbieminderhoud
 
 ## Example
 
-A typical small fix, anonymised from real sessions:
+A typical feature, anonymised from real sessions. Three independent parts go to three subagents at once, each on the model its job needs:
 
 ```
-> The search box fires too early. Make the debounce 3000 ms instead of 350.
+> Add a CSV export to the invoices page: an API endpoint, a button, and a changelog entry.
 
-● Bash  grep -rn "delay" src/components/SearchBox.vue
-  191:  const delay = 350
+● Bash  grep -n "listInvoices\|filters" src/api/invoices.ts src/pages/Invoices.vue
+  ...
 
-  The constant is at src/components/SearchBox.vue:191. No test covers it.
-  Delegating the one-line edit and the commit.
+  Three independent parts. Running them in parallel.
+  Subagents: inherit/high (endpoint), sonnet/medium (button), haiku/low (changelog)
 
-  Subagent: sonnet/medium
+● Agent  CSV export endpoint        inherit/high · background
+  │ Add GET /invoices/export.csv in src/api/invoices.ts. Reuse listInvoices(),
+  │ same filters as the list endpoint. Add a test in tests/api/invoices.test.ts.
+  │ Commit "feat(invoices): CSV export endpoint". Verify: npm test -- invoices.
+● Agent  Export button              sonnet/medium · background
+  │ Add an "Export CSV" button to src/pages/Invoices.vue that links to
+  │ /invoices/export.csv with the current filters. Commit "feat(invoices): export button".
+● Agent  Changelog entry            haiku/low · background
+  │ Add one line under "Unreleased" in CHANGELOG.md: "CSV export on the invoices page".
+  │ Commit "docs: changelog for CSV export".
 
-● Agent  Change search debounce
-  │ Edit src/components/SearchBox.vue: delay 350 → 3000, nothing else.
-  │ Commit only that file: "fix(search): wait 3 s before auto-search". Don't push.
-  │ Verify: git show --stat HEAD shows 1 file, 1 line. Report the output.
-  └ Done. 1 file changed, 1 insertion(+), 1 deletion(-). Commit 3f2a91c.
+  ⎿ Changelog entry done, commit 1c4e0a2                    9 s
+  ⎿ Export button done, commit 7b19d3e                     48 s
+  ⎿ CSV export endpoint done, 4 new tests pass, e2a6f80   3 min
 
-● Bash  git show HEAD
-  -  const delay = 350
-  +  const delay = 3000
+● Bash  git diff HEAD~3 -- src/pages/Invoices.vue
+  +  <a :href="`/invoices/export.csv?from=${from}&to=${to}`">Export CSV</a>
 
-  Search now waits 3 s before it runs.
-  Done:    delay 350 → 3000 in SearchBox.vue, commit 3f2a91c
-  Checked: git show HEAD → one line changed, nothing else
-  Note:    no test covers this delay; not pushed
+  The button drops the status filter. Sending it back.
+
+● SendMessage  Export button
+  │ Round 2, same rules: also pass the status filter (&status=...). Amend nothing, new commit.
+  ⎿ Done, commit 4d8c2b1
+
+● Bash  git log --oneline -4 && npm test && npm run lint
+  212 passed · lint clean
+
+  CSV export works end to end.
+  Done:    endpoint + test, button, changelog (4 commits)
+  Checked: git diff HEAD~4, npm test → 212 passed, lint clean
+  Note:    not pushed
 ```
 
 When the main session tries to edit anyway, the hook stops it and it delegates:
@@ -57,12 +72,6 @@ When the main session tries to edit anyway, the hook stops it and it delegates:
 
 ● Agent  Update config default
 ```
-
-Larger work follows the same loop, at a bigger scale:
-
-- Independent parts go out as parallel subagents in one message, e.g. backend on `sonnet/high` and docs on `haiku/low`.
-- The main session reads the full diff and runs the tests and linter itself before it reports.
-- Problems go back to the same subagent with `SendMessage` ("Round 2, same rules: 1. … 2. …") instead of being fixed in the main session.
 
 In the first week of daily use: about 420 subagent spawns, a median of 3 per session, and about 12 seconds of extra time for a delegated one-line edit.
 
