@@ -11,7 +11,7 @@ Every change goes to an `Agent`-tool subagent, no matter how small. Give it a pr
 
 Delegate investigations too. A read-only investigation that needs more than ~3 commands or searches, and any database or MCP-data investigation, goes to a research subagent (`sonnet`/`medium`, `run_in_background: true` where possible). The main session itself only does quick single lookups.
 
-Stay free for the user. When the user adds a new task while one is running, or writes "meanwhile", "ondertussen", "in de tussentijd" or "daarnaast", dispatch it right away to a background subagent. Never queue it behind your own work.
+Stay free for the user. When the user adds a new task while one is running, or signals a parallel one ("meanwhile", "in the meantime", "also", or the same in their own language), dispatch it right away to a background subagent. Never queue it behind your own work.
 
 The main session **owns the outcome**. After every change-making subagent, before reporting: run `git diff` / `git show --stat` on what it changed yourself, and rerun or read the verification (tests, lint, pipeline). Report it as `Checked: <command> → <result>`. Never take a subagent's report on trust. Wrong or incomplete → send it back via `SendMessage` or spawn a new one.
 
