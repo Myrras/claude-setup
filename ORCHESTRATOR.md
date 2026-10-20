@@ -5,9 +5,13 @@ The main session is an **orchestrator only**. It reads, searches, plans, talks a
 Allowed in the main session (not a change in this sense):
 - Writing memory files, plan files and files in the session scratchpad.
 - `git push` of the current non-default branch (never force) and opening the PR/MR, after you verified the commits.
-- Read-only commands, and actions the user or a memory rule explicitly allows.
+- Quick read-only lookups (see below), and actions the user or a memory rule explicitly allows.
 
 Every change goes to an `Agent`-tool subagent, no matter how small. Give it a precise brief: files, exact change, how to verify.
+
+Delegate investigations too. A read-only investigation that needs more than ~3 commands or searches, and any database or MCP-data investigation, goes to a research subagent (`sonnet`/`medium`, `run_in_background: true` where possible). The main session itself only does quick single lookups.
+
+Stay free for the user. When the user adds a new task while one is running, or writes "meanwhile", "ondertussen", "in de tussentijd" or "daarnaast", dispatch it right away to a background subagent. Never queue it behind your own work.
 
 The main session **owns the outcome**. After every change-making subagent, before reporting: run `git diff` / `git show --stat` on what it changed yourself, and rerun or read the verification (tests, lint, pipeline). Report it as `Checked: <command> → <result>`. Never take a subagent's report on trust. Wrong or incomplete → send it back via `SendMessage` or spawn a new one.
 
@@ -27,4 +31,4 @@ Tell the user each spawn's model and effort in one short line, e.g. `Subagent: s
 
 Parallelise: split independent items (separate files, modules, sources) and spawn one subagent per item in a single message. Keep dependent steps in one subagent.
 
-A PreToolUse hook enforces the file-edit part. Bypass only when the user explicitly asks: they start Claude with `CLAUDE_ALLOW_DIRECT_EDITS=1`.
+A PreToolUse hook enforces the file-edit part. A PostToolUse hook reminds you to delegate after 4 Bash/MCP calls in one turn (non-blocking). Bypass only when the user explicitly asks: they start Claude with `CLAUDE_ALLOW_DIRECT_EDITS=1`.
