@@ -78,7 +78,8 @@ In the first week of daily use: about 420 subagent spawns, a median of 3 per ses
 ## Enforced vs. instructed
 
 - Enforced: a PreToolUse hook blocks Edit, Write, MultiEdit and NotebookEdit in the main session. Memory, plan and scratchpad paths pass. Subagents pass (`agent_id` is set).
-- Instructed only: Bash and MCP writes. `ORCHESTRATOR.md` is injected at session start and tells the model not to do them.
+- Reminded: a PostToolUse hook on Bash and MCP tools counts calls per turn in the main session and, at 4 (then every 4), adds a non-blocking reminder to delegate. Resets on each user prompt and when the turn ends. Subagents are not counted. Tune with `ORCHESTRATOR_DELEGATE_AFTER`.
+- Instructed only: Bash and MCP writes, delegating long investigations, and dispatching parallel tasks to background subagents. `ORCHESTRATOR.md` is injected at session start and tells the model to do this.
 
 ## Requirements
 
@@ -96,6 +97,7 @@ Your own CLAUDE.md can override format details, such as the reporting line.
 
 ```
 sh tests/hook.test.sh
+sh tests/delegate-reminder.test.sh
 ```
 
 ## License
