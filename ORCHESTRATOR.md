@@ -12,12 +12,12 @@ Every change goes to an `Agent`-tool subagent, no matter how small. Give it a pr
 ## Workflow for every prompt
 
 1. **Interpret.** State the goal and the done-criterion in one or two lines.
-2. **Decompose.** List the slices before you spawn anything. A slice is a thin vertical piece: one working, testable behaviour through every layer it needs. Not a layer ("all backend", "all UI"). Each slice states its goal, the files it owns and its verify command. Size cap: one slice is about one behaviour and ~1–3 files. A brief with more than ~8 items is several slices. When slices share a contract (a type, interface, IPC signature, schema), fix it first, in the briefs or in one small spawn, then fan out. A single slice is fine only when the work cannot be split; say why in one line.
-3. **Fan out.** Spawn every independent slice in one message, in the background. Parallel writers never share a working tree: each change-making slice gets its own git worktree on its own branch from the same base (`isolation: "worktree"` or the host's worktree tool). Read-only slices need no worktree. Dependent slices go in a next wave once the first wave is verified.
-4. **Merge.** One subagent (`haiku`/`low`) merges the slice branches into one integration branch and runs the tests. A conflict goes back to the slice that owns the file.
+2. **Decompose.** List the slices before you spawn anything. A slice is a thin vertical piece: one working, testable behaviour through every layer it needs. Not a layer ("all backend", "all UI"). Each slice states its goal, the files it owns and its verify command. Size cap: one slice is about one behaviour and ~1–3 files. A brief with more than ~8 items is several slices. No two slices own the same file. Do not split below one behaviour; the same small edit across several files is one slice. When slices share a contract (a type, interface, IPC signature, schema), fix it first, in the briefs or in one small spawn, then fan out. A single slice is fine only when the work cannot be split; say why in one line.
+3. **Fan out.** Spawn every independent slice in one message, in the background. Parallel writers never share a working tree: each change-making slice gets its own git worktree on its own branch from the same base (`isolation: "worktree"`, the host's worktree tool, or `git worktree add` by the subagent). Read-only slices need no worktree. Dependent slices go in a next wave once the first wave is verified.
+4. **Merge.** One subagent (`haiku`/`low`, or `sonnet`/`medium` when conflicts are likely) merges the slice branches into one integration branch and runs the tests. A conflict goes back to the slice that owns the file.
 5. **Review.** Review the combined diff and rerun the verification yourself. For features (2+ slices) or risky changes, also spawn a fresh read-only reviewer subagent that did not write the code. Then report.
 
-With a single slice, skip the worktree and the merge.
+With a single slice, skip the worktree and the merge, unless another writer is active in the same tree.
 
 Parallelise: separate behaviours, files, modules or sources each get their own subagent, spawned in one message. A slice is dependent only when it needs another slice's output. A shared contract is not dependence once it is fixed in the briefs. Dependence means a next wave, never a reason to bundle work into one subagent.
 
@@ -27,7 +27,7 @@ Stay free for the user. When the user adds a new task while one is running, or s
 
 The main session **owns the outcome**. After every change-making subagent, before reporting: run `git diff` / `git show --stat` on what it changed yourself, and rerun or read the verification (tests, lint, pipeline). Report it as `Checked: <command> → <result>`. Never take a subagent's report on trust. Wrong or incomplete → send it back via `SendMessage` or spawn a new one.
 
-Review/fix loops only (a skill that reviews, fixes and re-reviews existing work): one subagent per round does all fixes, tests and the commit together. This does not apply to new work; new work is split into slices.
+Review/fix loops driven by a skill only (a skill that reviews, fixes and re-reviews existing work): one subagent per round does all fixes, tests and the commit together. This does not apply to new work; new work is split into slices.
 
 Pick `model` and `effort` per task, and always pass both:
 
