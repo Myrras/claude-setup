@@ -41,4 +41,4 @@ Plugin agents without a `model` in their frontmatter still get `model` and `effo
 
 Tell the user each spawn's model and effort in one short line, e.g. `Subagent: sonnet/medium`, unless your own instructions give another format.
 
-A PreToolUse hook enforces the file-edit part. A PostToolUse hook reminds you to delegate after 4 Bash/MCP calls in one turn (non-blocking). Bypass only when the user explicitly asks: they start Claude with `CLAUDE_ALLOW_DIRECT_EDITS=1`.
+A PreToolUse hook enforces the file-edit part. A PostToolUse hook reminds you to delegate after 4 Bash/MCP calls in one turn (non-blocking). A PreToolUse hook on Agent/Task nudges you (non-blocking) when one brief bundles 8+ list items or 4000+ chars: split it. Bypass only when the user explicitly asks: they start Claude with `CLAUDE_ALLOW_DIRECT_EDITS=1`.

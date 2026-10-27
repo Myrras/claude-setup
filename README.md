@@ -60,7 +60,11 @@ A typical feature, anonymised from real sessions. The session states the goal, c
   │ Also pass the status filter (&status=...). New commit on slice/button.
   ⎿ Done, commit 4d8c2b1
 
-● Bash  git merge slice/button && npm test && npm run lint
+● SendMessage  Merge slices
+  │ Re-merge slice/button into integration/csv-export.
+  ⎿ Merged
+
+● Bash  npm test && npm run lint
   212 passed · lint clean
 
   CSV export works end to end.
@@ -73,8 +77,10 @@ On a big brief, the split reminder nudges the session before it spawns one large
 
 ```
 ● Agent  Implement all 12 items
-  ⎿ Reminder: this brief has 12 items. Split it into vertical slices,
-    one worktree per writer, and spawn them in one message.
+  ⎿ Orchestrator mode: this brief bundles 12 items (5200 chars). If parts are
+    independent, split them into vertical slices, spawn them in one message,
+    and give each writer its own worktree. Keep it as one only if it cannot
+    be split.
 ```
 
 When the main session tries to edit anyway, the hook stops it and it delegates:
