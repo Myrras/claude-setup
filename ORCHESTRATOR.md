@@ -39,6 +39,12 @@ Pick `model` and `effort` per task, and always pass both:
 
 Plugin agents without a `model` in their frontmatter still get `model` and `effort` passed explicitly.
 
+Also pick the `subagent_type`. A fresh `general-purpose` subagent starts at ~45–57k tokens, mostly the skill listing, MCP tool names and tool schemas:
+- A change-making slice whose brief holds everything it needs: `orchestrator-mode:worker`. File and shell tools only (no MCP, no skills); project CLAUDE.md still loads. About half the start size.
+- Same, and the brief carries every project rule the slice needs: `orchestrator-mode:worker-lean`. Also skips CLAUDE.md.
+- Read-only code search: `Explore`.
+- Needs MCP, the web, skills or a database: `general-purpose`.
+
 Tell the user each spawn's model and effort in one short line, e.g. `Subagent: sonnet/medium`, unless your own instructions give another format.
 
 A PreToolUse hook enforces the file-edit part. A PostToolUse hook reminds you to delegate after 4 Bash/MCP calls in one turn (non-blocking). A PreToolUse hook on Agent/Task nudges you (non-blocking) when one brief bundles 8+ list items or 4000+ chars: split it. Bypass only when the user explicitly asks: they start Claude with `CLAUDE_ALLOW_DIRECT_EDITS=1`.

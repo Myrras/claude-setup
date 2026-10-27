@@ -97,6 +97,18 @@ When the main session tries to edit anyway, the hook stops it and it delegates:
 
 In the first week of daily use: about 420 subagent spawns, a median of 3 per session, and about 12 seconds of extra time for a delegated one-line edit.
 
+## Agents
+
+The plugin ships two lean agents for change-making slices. Both get only Read, Edit, Write, Bash, Grep and Glob: no MCP tools and no skill listing.
+
+| Agent | CLAUDE.md | Start size, large repo | Start size, small repo |
+|---|---|---|---|
+| `general-purpose` (built-in) | yes | 44k | 28k |
+| `orchestrator-mode:worker` | yes | 23k | 8k |
+| `orchestrator-mode:worker-lean` | no | 5.5k | 5.5k |
+
+Measured on the first request of each subagent, Haiku, one run each. With `worker-lean` the brief must carry the project rules. Slices that need MCP, the web or skills stay on `general-purpose`.
+
 ## Enforced vs. instructed
 
 - Enforced: a PreToolUse hook blocks Edit, Write, MultiEdit and NotebookEdit in the main session. Memory, plan and scratchpad paths pass. Subagents pass (`agent_id` is set).

@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-mode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Main session orchestrates and verifies; subagents make every change. Enforced by a PreToolUse hook.",
   "author": { "name": "RobbieMinderhoud" },
   "repository": "https://github.com/RobbieMinderhoud/claude-orchestrator-mode",
