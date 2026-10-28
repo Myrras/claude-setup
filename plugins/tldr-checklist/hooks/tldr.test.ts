@@ -223,6 +223,25 @@ describe('closing items', () => {
     expect(state(applyReply(doc, parseReply('✔ You Deploy')))).toEqual([['Deploy: staging', true]])
   })
 
+  test('close matching ignores code ticks, emphasis and trailing punctuation', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You `npm run build`\n→ You Ship it'))
+    doc = applyReply(doc, parseReply('✔ You Run the migration.\n✔ You npm run build\n✔ You **Ship it**!'))
+    expect(state(doc).map(([, done]) => done)).toEqual([true, true, true])
+  })
+
+  test('a prefix is ambiguous over ticked items too, and ticks only an open one', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy to prod\n→ You Deploy to staging'))
+    doc = toggle(doc, doc.items[0]!.id)
+    expect(state(applyReply(doc, parseReply('✔ You Deploy')))).toEqual([['Deploy to staging', false]])
+  })
+
+  test('- and \' are word characters in a prefix', () => {
+    const doc = applyReply(emptyDoc('s1'), parseReply("→ You Re-run the job\n→ You Don't merge yet\n→ You Don’t wait"))
+    const after = applyReply(doc, parseReply('✔ You Re\n✔ You Don'))
+    expect(after.items.every(i => !i.done)).toBe(true)
+    expect(state(applyReply(doc, parseReply("✔ You Re-run")))[0]).toEqual(['Re-run the job', true])
+  })
+
   test('a close wins over a re-list in the same reply', () => {
     expect(state(applyReply(emptyDoc('s1'), parseReply('→ You X\n✔ You X')))).toEqual([['X', true]])
     const open = applyReply(emptyDoc('s1'), parseReply('→ You X'))
@@ -253,7 +272,8 @@ describe('panelState', () => {
     const text = panelState(doc)!
     expect(text).toContain('Open:\n- Run the migration')
     expect(text).toContain('Ticked off:\n- Review the PR')
-    expect(text).toContain('✔ You <item text>')
+    expect(text).toContain('close it with a line: ✔ You <item text>')
+    expect(text.split('\n').some(line => parseReply(line).you.length || parseReply(line).closed.length)).toBe(false)
     const ticked = panelState(toggle(doc, doc.items[0]!.id))!
     expect(ticked).not.toContain('Open:')
     expect(ticked).not.toContain('✔ You')

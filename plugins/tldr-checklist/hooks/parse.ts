@@ -76,17 +76,17 @@ For replies to the user only; as a subagent, or when a specific output format is
 // The checklist as the user sees it, sent with each prompt; nothing when it is empty.
 export function panelState(doc: Doc): string | undefined {
   const open = doc.items.filter(item => !item.done)
-  const ticked = doc.items.filter(item => item.done)
-  if (!open.length && !ticked.length) return undefined
+  const done = doc.items.filter(item => item.done)
+  if (!doc.items.length) return undefined
   const list = (items: Item[]) => items.map(item => `- ${item.text}`).join('\n')
   const parts = ['The → You checklist in the side panel:']
   if (open.length) parts.push(`Open:\n${list(open)}`)
-  if (ticked.length) parts.push(`Ticked off:\n${list(ticked)}`)
+  if (done.length) parts.push(`Ticked off:\n${list(done)}`)
   const rules = [
     "Don't repeat these as → You lines unless they changed.",
     "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
   ]
-  if (open.length) rules.push('When an open item is done, close it with a line `✔ You <item text>`.')
+  if (open.length) rules.push('When an open item is done, close it with a line: ✔ You <item text>')
   parts.push(rules.join('\n'))
   return parts.join('\n\n')
 }
@@ -109,8 +109,8 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
   }
   const open = [...kept, ...added]
-  const all = new Set([...doc.items, ...open].map(item => normalize(item.text)))
-  const items = open.map(item => (closes(reply.closed, item, open, all) ? { ...item, done: true } : item))
+  const all = new Set([...doc.items, ...open].map(item => closeKey(item.text)))
+  const items = open.map(item => (closes(reply.closed, item, all) ? { ...item, done: true } : item))
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
 }
 
@@ -119,17 +119,23 @@ export function ticked(after: Doc): string[] {
   return after.items.filter(item => item.done).map(item => item.text)
 }
 
-// `✔ You <text>` closes the item with that text, or the one open item whose first words it is.
-// Text that equals any item never prefix-matches another; a prefix ends at a non-letter, non-digit.
-function closes(closed: string[], item: Item, open: Item[], all: Set<string>): boolean {
-  const key = normalize(item.text)
-  const keys = open.map(other => normalize(other.text))
+// Looser than normalize, for closes only: no code ticks, emphasis marks or trailing punctuation.
+function closeKey(text: string): string {
+  return normalize(text).replace(/[`*_]/g, '').replace(/[.,;:!?\s]+$/, '')
+}
+
+// `✔ You <text>` closes the item with that text, or the one item whose first words it is.
+// Text that equals any item never prefix-matches another; a prefix ends at a non-word character
+// (letters, digits, - and ' are word characters) and is ambiguous when it fits several of all items.
+function closes(closed: string[], item: Item, all: Set<string>): boolean {
+  const key = closeKey(item.text)
   return closed.some(text => {
-    const want = normalize(text)
+    const want = closeKey(text)
+    if (!want) return false
     if (want === key) return true
     if (all.has(want)) return false
-    const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}]/u.test(other[want.length] ?? ' ')
-    return starts(key) && keys.filter(starts).length === 1
+    const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}'’-]/u.test(other[want.length] ?? ' ')
+    return starts(key) && [...all].filter(starts).length === 1
   })
 }
 

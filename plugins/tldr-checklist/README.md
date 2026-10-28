@@ -24,7 +24,7 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 - The first `TL;DR` line is the TL;DR. If a reply has none, the previous one stays.
 - Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine.
-- A `✔ You <item>` line ticks the open item with that text, as if you clicked it. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word, and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins. `✔ Done` and `✔ Checked` never tick anything.
+- A `✔ You <item>` line ticks the open item with that text, as if you clicked it. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins. `✔ Done` and `✔ Checked` never tick anything.
 - Lines inside code fences are skipped.
 - Repeats are matched with case and whitespace ignored.
 
@@ -36,7 +36,7 @@ The reply format is added to every conversation, subagents too, as the API offer
 
 ## Setting
 
-`inject` (on by default) sends both the reply format and the checklist state. Turn it off if you bring your own reply format: the pane then only reads the replies. Change it in `/config`, or in settings:
+`inject` (on by default) sends both the reply format and the checklist state. Turn it off if you bring your own reply format: the pane then only reads the replies. Turning it off mid-conversation stops the checklist state right away; the reply format already sent stays until the next conversation or compaction. Change it in `/config`, or in settings:
 
 ```json
 { "pluginConfigs": { "tldr-checklist": { "options": { "inject": false } } } }
