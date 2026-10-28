@@ -75,6 +75,21 @@ describe('parseReply', () => {
     expect(parseReply(`~~~\n\`\`\`\n${inside}\n~~~~\n→ You shown`).you).toEqual(['shown'])
   })
 
+  test('a fence may open on a bullet line', () => {
+    expect(parseReply('- ```bash\n  → You hidden\n  ```\n\n→ You run the tests').you).toEqual(['run the tests'])
+  })
+
+  test('drops the closing emphasis of a wrapped line', () => {
+    expect(parseReply('**→ You: restart the server**').you).toEqual(['restart the server'])
+    expect(parseReply('**TL;DR: done**').tldr).toBe('done')
+    expect(parseReply('_! Note risk_').notes).toEqual(['risk'])
+    expect(parseReply('→ You keep a*b').you).toEqual(['keep a*b'])
+  })
+
+  test('→ You and ! Note ignore case', () => {
+    expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'] })
+  })
+
   test('a reply without the format yields nothing', () => {
     expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [] })
   })
@@ -121,13 +136,16 @@ describe('parseStatus', () => {
   })
 })
 
-function world(on: On, status: string | undefined) {
+function world(on: On, status: string | undefined, unreadable = false) {
   const files = new Map<string, string>()
   mock.env(on, { HOME: '/home/me' })
   const clock = mock.clock(on)
   on('session.id', () => ({ value: 's1' }))
   on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
-  on('fs.read', (_, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.read', (_, e) => {
+    if (unreadable) throw new Error('EACCES')
+    return { value: files.get(e.path) ?? '' }
+  })
   on('fs.write', (_, e) => {
     files.set(e.path, e.text)
     return { value: undefined }
@@ -204,4 +222,23 @@ test('state saved by an earlier session is loaded at start', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /\[x\] Review the PR/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /\[ \] Run the migration/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('an unreadable state file is not overwritten', async ($, on) => {
+  const { clock, saved, files } = world(on, '{"goal":"g"}', true)
+  files.set(FILE, 'keep me')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect(files.get(FILE)).toBe('keep me')
+  
+})
+
+test('an empty reply skips the status call', async ($, on) => {
+  const { clock, saved } = world(on, '{"goal":"Ship","next":"x","blockers":"none"}')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('Just a plain answer.', 't1'))
+  await clock.settle()
+  expect(saved()?.turn).toBe(1)
+  expect(saved()?.goal).toBe('')
 })

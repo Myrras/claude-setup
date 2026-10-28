@@ -8,18 +8,21 @@ const BULLET = /^\s*(?:[-*+]\s+)?/
 const EM = '(?:\\*\\*|__|\\*|_)?'
 const tag = (name: string, flags = '') => new RegExp(`^${EM}${name}(?:${EM}:${EM}\\s*|${EM}\\s+)(.*\\S)`, flags)
 const TLDR = tag('TL;DR', 'i')
-const YOU = tag('→\\s*You')
-const NOTE = tag('!\\s*Note')
+const YOU = tag('→\\s*You', 'i')
+const NOTE = tag('!\\s*Note', 'i')
+const OPENS = /^(?:\*\*|__|\*|_)/
+const CLOSES = /(?:\*\*|__|\*|_)+$/
 
 export function normalize(text: string): string {
-  return text.trim().replace(/\s+/g, ' ').toLowerCase()
+  return tidy(text).toLowerCase()
 }
 
 export function parseReply(answer: string): Reply {
   const reply: Reply = { you: [], notes: [] }
   let fence: string | undefined
   for (const raw of answer.split('\n')) {
-    const marks = FENCE.exec(raw)
+    const line = raw.replace(BULLET, '')
+    const marks = FENCE.exec(line)
     if (fence === undefined) {
       if (marks) fence = marks[1]
       if (marks) continue
@@ -28,15 +31,20 @@ export function parseReply(answer: string): Reply {
       if (marks && marks[1]![0] === fence[0] && marks[1]!.length >= fence.length && !marks[2]!.trim()) fence = undefined
       continue
     }
-    const line = raw.replace(BULLET, '')
-    const tldr = TLDR.exec(line)?.[1]
-    if (tldr !== undefined && reply.tldr === undefined) reply.tldr = tidy(tldr)
-    const you = YOU.exec(line)?.[1]
-    if (you !== undefined) reply.you.push(tidy(you))
-    const note = NOTE.exec(line)?.[1]
-    if (note !== undefined) reply.notes.push(tidy(note))
+    const tldr = grab(TLDR, line)
+    if (tldr && reply.tldr === undefined) reply.tldr = tldr
+    const you = grab(YOU, line)
+    if (you) reply.you.push(you)
+    const note = grab(NOTE, line)
+    if (note) reply.notes.push(note)
   }
   return reply
+}
+
+// A line wrapped in emphasis ends in its closing marks; they are not part of the text.
+function grab(re: RegExp, line: string): string | undefined {
+  const text = re.exec(line)?.[1]
+  return text === undefined ? undefined : tidy(OPENS.test(line) ? text.replace(CLOSES, '') : text)
 }
 
 export function emptyDoc(sessionId: string): Doc {
