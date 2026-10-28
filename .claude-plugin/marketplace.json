@@ -2,5 +2,5 @@
   "name": "robbieminderhoud",
   "description": "Personal Claude Code plugins by RobbieMinderhoud.",
   "owner": { "name": "RobbieMinderhoud" },
-  "plugins": [{ "name": "orchestrator-mode", "source": "./", "description": "Main session orchestrates and verifies; subagents make every change." }]
+  "plugins": [{ "name": "orchestrator-mode", "source": "./plugins/orchestrator-mode", "description": "Main session orchestrates and verifies; subagents make every change." }]
 }
