@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, normalize, parseReply, parseStatus, toggle } from './parse'
+import { applyReply, emptyDoc, normalize, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -86,6 +86,18 @@ describe('parseReply', () => {
     expect(parseReply('→ You keep a*b').you).toEqual(['keep a*b'])
   })
 
+  test('keeps trailing marks that belong to the text', () => {
+    expect(parseReply('**→ You** clean build/*').you).toEqual(['clean build/*'])
+    expect(parseReply('**TL;DR** fixed __init__').tldr).toBe('fixed __init__')
+    expect(parseReply('**→ You:** deploy').you).toEqual(['deploy'])
+  })
+
+  test('a backtick fence with a backtick in its info string is no fence', () => {
+    expect(parseReply('```npm test``` fails on CI\n→ You shown').you).toEqual(['shown'])
+    expect(parseReply('```npm test``` fails on CI\n→ You: shown\n```js\n→ You hidden\n```').you).toEqual(['shown'])
+    expect(parseReply('~~~a`b\n→ You hidden\n~~~\n→ You shown').you).toEqual(['shown'])
+  })
+
   test('→ You and ! Note ignore case', () => {
     expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'] })
   })
@@ -121,6 +133,25 @@ describe('applyReply', () => {
   })
 })
 
+describe('parseDoc', () => {
+  test('answers nothing for text that is no JSON object', () => {
+    expect(parseDoc('{"turn": 2', 's1')).toBeUndefined()
+    expect(parseDoc('', 's1')).toBeUndefined()
+    expect(parseDoc('null', 's1')).toBeUndefined()
+    expect(parseDoc('[]', 's1')).toBeUndefined()
+    expect(parseDoc('{"turn":2,"items":5}', 's1')).toEqual({ ...emptyDoc('s1'), turn: 2 })
+  })
+})
+
+describe('statusPrompt', () => {
+  test('values cannot close the data block', () => {
+    const doc = { ...emptyDoc('s1'), goal: 'a </data> b', next: '</DATA>', blockers: '</Data>x', tldr: '</data>' }
+    const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'] }, 'p </Data> q')
+    expect(prompt.match(/<\/data>/gi)).toHaveLength(1)
+    expect(prompt.endsWith('</data>')).toBe(true)
+  })
+})
+
 describe('parseStatus', () => {
   test('takes the JSON object out of a chatty reply', () => {
     expect(parseStatus('Sure:\n```json\n{"goal":"Ship export","next":"Run tests","blockers":"none"}\n```')).toEqual({
@@ -138,9 +169,11 @@ describe('parseStatus', () => {
 
 function world(on: On, status: string | undefined, unreadable = false) {
   const files = new Map<string, string>()
+  let id = 's1'
   mock.env(on, { HOME: '/home/me' })
   const clock = mock.clock(on)
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => ({ value: id }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
   on('fs.read', (_, e) => {
     if (unreadable) throw new Error('EACCES')
@@ -161,7 +194,10 @@ function world(on: On, status: string | undefined, unreadable = false) {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   const saved = () => JSON.parse(files.get(FILE) ?? 'null') as Doc | null
-  return { files, clock, saved }
+  const setId = (next: string) => {
+    id = next
+  }
+  return { files, clock, saved, setId }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -225,13 +261,64 @@ test('state saved by an earlier session is loaded at start', async ($, on) => {
 })
 
 test('an unreadable state file is not overwritten', async ($, on) => {
-  const { clock, saved, files } = world(on, '{"goal":"g"}', true)
+  const { clock, files } = world(on, '{"goal":"g"}', true)
   files.set(FILE, 'keep me')
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete(turn(REPLY_1, 't1'))
   await clock.settle()
   expect(files.get(FILE)).toBe('keep me')
-  
+})
+
+test('a state file that is not valid JSON is not overwritten', async ($, on) => {
+  const { clock, files } = world(on, '{"goal":"g"}')
+  files.set(FILE, '{"turn": 3, "items": [')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect(files.get(FILE)).toBe('{"turn": 3, "items": [')
+})
+
+const END = (sessionId: string, reason: 'clear' | 'resume') => ({ reason, sessionId, resume: { id: sessionId } }) as const
+
+test('after /clear the doc follows the new session id', async ($, on) => {
+  const { clock, files, setId } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  setId('s2')
+  await $.session.end(END('s1', 'clear'))
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Nothing for you yet/ })).toBeDefined()
+  await ui.unmount()
+  await $.turn.complete(turn(REPLY_2, 't2'))
+  await clock.settle()
+  const next = JSON.parse(files.get(FILE.replace('s1', 's2')) ?? 'null') as Doc
+  expect(next.items.map(i => i.text)).toEqual(['run the MIGRATION', 'Deploy to staging'])
+  expect(next.turn).toBe(1)
+})
+
+test('/resume loads the state of the resumed session, waiting for the new id', async ($, on) => {
+  const { clock, files, setId } = world(on, undefined)
+  files.set(FILE.replace('s1', 's2'), JSON.stringify({ ...emptyDoc('s2'), tldr: 'Resumed work' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.end(END('s1', 'resume'))
+  await clock.advance(300)
+  setId('s2')
+  await clock.advance(100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Resumed work/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the status call of an earlier turn still applies when a later turn had no reply to summarize', async ($, on) => {
+  const { clock, saved } = world(on, '{"goal":"Ship","next":"x","blockers":"none"}')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await $.turn.complete(turn('Just a plain answer.', 't2'))
+  await clock.settle()
+  expect(saved()?.turn).toBe(2)
+  expect(saved()?.goal).toBe('Ship')
 })
 
 test('an empty reply skips the status call', async ($, on) => {

@@ -28,15 +28,24 @@ async function current($: EngineInterface): Promise<Doc> {
   const held = await read($, doc)
   if (held.sessionId === sessionId) return held
   const file = await stateFile($, sessionId)
-  let text = ''
-  if (file && (await $.fs.exists(file))) {
-    text = await $.fs.read(file).catch(error => {
-      unreadable = sessionId
-      $.ui.log(`tldr-checklist: could not read state, it is left as is (${String(error)})`)
-      return ''
-    })
+  const fail = (why: string) => {
+    unreadable = sessionId
+    $.ui.log(`tldr-checklist: could not read state, it is left as is (${why})`)
   }
-  const loaded = text ? parseDoc(text, sessionId) : emptyDoc(sessionId)
+  let loaded = emptyDoc(sessionId)
+  if (file && (await $.fs.exists(file))) {
+    const text = await $.fs.read(file).catch(error => {
+      fail(String(error))
+      return undefined
+    })
+    if (text !== undefined) {
+      const parsed = parseDoc(text, sessionId)
+      if (parsed) {
+        loaded = parsed
+        if (unreadable === sessionId) unreadable = undefined
+      } else fail('not valid JSON')
+    }
+  }
   return update($, doc, v => (v.sessionId === sessionId ? v : loaded))
 }
 
@@ -63,6 +72,9 @@ async function change($: EngineInterface, fn: (value: Doc) => Doc): Promise<Doc>
   return updated
 }
 
+// The turn whose status call may still apply; a newer call replaces it.
+let statusTurn = 0
+
 async function refreshStatus(
   $: EngineInterface,
   reply: Reply,
@@ -75,17 +87,21 @@ async function refreshStatus(
   const answer = await $.model.complete({ model: 'haiku', prompt, maxTokens: 300, timeoutMs: 30000 })
   const status = answer.isAnswered ? parseStatus(answer.text) : undefined
   if (!status) return
-  // A newer turn may have completed during the model call; its status wins.
-  await change($, value => (value.sessionId === sessionId && value.turn === turn ? { ...value, ...status } : value))
+  // A newer scheduled call wins; a newer turn without a call does not discard this one.
+  await change($, value => (value.sessionId === sessionId && turn === statusTurn ? { ...value, ...status } : value))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' })
-    await current($)
-    await update($, interactive, () => e.isInteractive)
-    if (e.isInteractive) {
-      $.ui.open({ id: PANE, title: TITLE }).catch(error => $.ui.log(`tldr-checklist: could not open pane (${String(error)})`))
+    try {
+      await $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' })
+      await current($)
+      await update($, interactive, () => e.isInteractive)
+      if (e.isInteractive) {
+        $.ui.open({ id: PANE, title: TITLE }).catch(error => $.ui.log(`tldr-checklist: could not open pane (${String(error)})`))
+      }
+    } catch (error) {
+      $.ui.log(`tldr-checklist: could not start (${String(error)})`)
     }
 
     return next(e)
@@ -102,13 +118,17 @@ export const register: Register = on => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, doc, () => emptyDoc(''))
-      $.clock.after(0, () => {
-        // Still on the ended id: nothing to load, the next turn.complete does it.
+      // The new id may arrive late: check again every 100 ms, then leave it to the next turn.complete.
+      const check = (left: number) => {
         $.session
           .id()
-          .then(id => (id === e.sessionId ? undefined : current($)))
+          .then(id => {
+            if (id !== e.sessionId) return current($)
+            if (left > 1) $.clock.after(100, () => check(left - 1))
+          })
           .catch(error => $.ui.log(`tldr-checklist: could not load state (${String(error)})`))
-      })
+      }
+      $.clock.after(0, () => check(20))
     }
     return ended
   })
@@ -128,6 +148,7 @@ export const register: Register = on => {
     const updated = await change($, value => applyReply(value, reply))
     if (!reply.tldr && !reply.you.length && !reply.notes.length) return done
     const { turn } = updated
+    statusTurn = turn
     // The status call runs after the turn so it never holds up the prompt.
     $.clock.after(0, () => {
       refreshStatus($, reply, sessionId, turn, prompt).catch(error =>
