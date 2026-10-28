@@ -12,8 +12,13 @@ const tag = (name: string, flags = '') => new RegExp(`^(${EM})${name}(?:(${EM}):
 const TLDR = tag('TL;DR', 'i')
 const YOU = tag('→\\s*You', 'i')
 const NOTE = tag('!\\s*Note', 'i')
-// ✔ or ✓, optionally in emoji presentation; `✔ Done` and `✔ Checked` do not match.
-const CLOSE = tag('[✔✓]\\uFE0F?\\s*You', 'i')
+// ✔, ✓, ✅ or ☑, optionally in emoji presentation; `✔ Done` and `✔ Checked` do not match.
+const CLOSE = tag('[✔✓✅☑]\\uFE0F?\\s*You', 'i')
+// Leading item numbers of a close (`2-3`, `2-1, 2-3`), then the end or a non-word character.
+const REFS = /^\d+-\d+(?:\s*,\s*\d+-\d+)*(?=$|[^\p{L}\p{N}'’-])/u
+
+// Most open items sent with a prompt; the pane warns from this many on.
+export const OPEN_CAP = 10
 
 export function normalize(text: string): string {
   return tidy(text).toLowerCase()
@@ -74,21 +79,35 @@ TL;DR  one line: the outcome
 For replies to the user only; as a subagent, or when a specific output format is asked, follow that instead.`
 
 // The checklist as the user sees it, sent with each prompt; nothing when it is empty.
+// At most OPEN_CAP open items, the newest; the pane keeps them all.
 export function panelState(doc: Doc): string | undefined {
-  const open = doc.items.filter(item => !item.done)
-  const done = doc.items.filter(item => item.done)
   if (!doc.items.length) return undefined
-  const list = (items: Item[]) => items.map(item => `- ${item.text}`).join('\n')
+  const open = doc.items.filter(item => !item.done).sort(byRef)
+  const shown = open.slice(-OPEN_CAP)
+  const read = doc.items.filter(item => item.done && item.tickedBy !== 'reply')
+  const closed = doc.items.filter(item => item.done && item.tickedBy === 'reply')
+  const list = (items: Item[]) => items.map(item => `- ${item.ref} ${item.text}`).join('\n')
   const parts = ['The → You checklist in the side panel:']
-  if (open.length) parts.push(`Open:\n${list(open)}`)
-  if (done.length) parts.push(`Ticked off:\n${list(done)}`)
+  if (shown.length) parts.push(`Open:\n${list(shown)}`)
+  const hidden = open.length - shown.length
+  if (hidden) parts.push(`${hidden} older open item${hidden === 1 ? '' : 's'} not shown; ask the user to tick off what is done.`)
+  if (read.length) parts.push(`Ticked by the user (read; not necessarily done):\n${list(read)}`)
+  if (closed.length) parts.push(`Closed in your last reply:\n${list(closed)}`)
   const rules = [
     "Don't repeat these as → You lines unless they changed.",
     "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
   ]
-  if (open.length) rules.push('When an open item is done, close it with a line: ✔ You <item text>')
+  if (open.length) rules.push('When an open item is done, close it with a line: ✔ You <number>')
+  if (read.length) rules.push('A user tick means read, not done: mention such an item only if it still needs doing.')
   parts.push(rules.join('\n'))
   return parts.join('\n\n')
+}
+
+// Oldest first: by the reply that added the item, then its place in that reply.
+function byRef(a: Item, b: Item): number {
+  const [at = 0, an = 0] = a.ref.split('-').map(Number)
+  const [bt = 0, bn = 0] = b.ref.split('-').map(Number)
+  return at - bt || an - bn
 }
 
 export function emptyDoc(sessionId: string): Doc {
@@ -101,17 +120,18 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
   // A `✔ You` line then ticks an item, one the same reply lists included; it stays until the reply after.
   const kept = doc.items.filter(item => !item.done)
   const seen = new Set(kept.map(item => normalize(item.text)))
+  // An item number is the reply's turn and the item's place among the ones that reply added; never reused.
   const added: Item[] = []
   for (const text of reply.you) {
     const key = normalize(text)
     if (seen.has(key)) continue
     seen.add(key)
-    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
+    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${added.length + 1}` })
   }
   const open = [...kept, ...added]
   const every = [...new Map([...doc.items, ...open].map(item => [item.id, item])).values()].map(item => closeKey(item.text))
   const all = new Set(every)
-  const items = open.map(item => (closes(reply.closed, item, all, every) ? { ...item, done: true } : item))
+  const items = open.map(item => (closes(reply.closed, item, all, every) ? { ...item, done: true, tickedBy: 'reply' as const } : item))
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
 }
 
@@ -131,6 +151,7 @@ function closeKey(text: string): string {
   return normalize(text).replace(/[`*_]/g, '').replace(/[.,;:!?\s]+$/, '')
 }
 
+// `✔ You <number>` closes the item with that number; text after the number is ignored.
 // `✔ You <text>` closes the item with that text, or the one item whose first words it is.
 // Text that equals any item never prefix-matches another; a prefix ends at a non-word character
 // (letters, digits, - and ' are word characters) and is ambiguous when it fits several of all items.
@@ -139,6 +160,8 @@ function closes(closed: string[], item: Item, all: Set<string>, every: string[])
   return closed.some(text => {
     const want = closeKey(text)
     if (!want) return false
+    const refs = REFS.exec(want)
+    if (refs) return refs[0].split(',').some(ref => ref.trim() === item.ref)
     if (want === key) return true
     if (all.has(want)) return false
     const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}'’-]/u.test(other[want.length] ?? ' ')
@@ -146,8 +169,10 @@ function closes(closed: string[], item: Item, all: Set<string>, every: string[])
   })
 }
 
+// A user tick means read, not necessarily done.
 export function toggle(doc: Doc, id: string): Doc {
-  return { ...doc, items: doc.items.map(item => (item.id === id ? { ...item, done: !item.done } : item)) }
+  const flip = (item: Item): Item => (item.done ? { ...item, done: false, tickedBy: undefined } : { ...item, done: true, tickedBy: 'user' })
+  return { ...doc, items: doc.items.map(item => (item.id === id ? flip(item) : item)) }
 }
 
 // Fields of the wrong type start over; text that is no JSON object (a truncated file) gives undefined.
@@ -155,7 +180,7 @@ export function parseDoc(text: string, sessionId: string): Doc | undefined {
   try {
     const value = JSON.parse(text) as Partial<Doc> | null
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-    const items = Array.isArray(value.items) ? value.items.filter(isItem) : []
+    const items = withRefs(Array.isArray(value.items) ? value.items.filter(isItem) : [])
     const str = (v: unknown) => (typeof v === 'string' ? v : '')
     return {
       sessionId,
@@ -231,16 +256,35 @@ function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-function isItem(value: unknown): value is Item {
-  const item = value as Item
+// State from before item numbers has no `ref` or `tickedBy`.
+type Stored = Omit<Item, 'ref'> & { ref?: string }
+
+function isItem(value: unknown): value is Stored {
+  const item = value as Stored
   return (
     typeof item === 'object' &&
     item !== null &&
     typeof item.id === 'string' &&
     typeof item.text === 'string' &&
     typeof item.done === 'boolean' &&
-    typeof item.firstSeenTurn === 'number'
+    typeof item.firstSeenTurn === 'number' &&
+    (item.ref === undefined || typeof item.ref === 'string') &&
+    (item.tickedBy === undefined || item.tickedBy === 'user' || item.tickedBy === 'reply')
   )
+}
+
+// A missing number is derived from the turn and the item's order in it, skipping the numbers taken there.
+function withRefs(items: Stored[]): Item[] {
+  const taken = new Set(items.map(item => item.ref))
+  const last = new Map<number, number>()
+  return items.map(item => {
+    if (item.ref !== undefined) return { ...item, ref: item.ref }
+    const turn = item.firstSeenTurn
+    let n = (last.get(turn) ?? 0) + 1
+    while (taken.has(`${turn}-${n}`)) n++
+    last.set(turn, n)
+    return { ...item, ref: `${turn}-${n}` }
+  })
 }
 
 // Stable across turns and reloads, so a Button keeps its key and a toggle finds its item.

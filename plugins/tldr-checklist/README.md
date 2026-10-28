@@ -4,7 +4,9 @@ A Claude Code mod that teaches Claude a short reply format and keeps a side pane
 
 - **TL;DR**: the one-line outcome of the latest reply.
 - **Goal, Next, Blockers**: three short lines for the session, written by one small model call (haiku) per turn. If that call fails, the previous values stay.
-- **→ You**: every `→ You` line from the replies becomes a checklist item. Click it, or focus it and press Enter, to tick or untick it. Ticked items stay in the list, dimmed and struck through, until the next reply. Items keep their state across turns, pane reopens and `--resume`. When a line repeats, it is not added again.
+- **→ You**: every `→ You` line from the replies becomes a checklist item. Click it, or focus it and press Enter, to tick or untick it. Ticked items stay in the list, dimmed and struck through, until the next reply. Items keep their state across turns, pane reopens and `--resume`. When a line repeats, it is not added again. From 10 open items on, the pane shows a warning to tick off what you have read.
+
+Each item gets a number `<reply>-<n>`: the reply that added it and its place among the items that reply added (`[ ] 2-3 Run the migration`). Numbers never change and are never reused; an item that was dropped and listed again gets a new one.
 
 ## Reply format
 
@@ -24,13 +26,19 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 - The first `TL;DR` line is the TL;DR. If a reply has none, the previous one stays.
 - Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine.
-- A `✔ You <item>` line ticks the open item with that text, as if you clicked it. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins. `✔ Done` and `✔ Checked` never tick anything.
+- A `✔ You <number>` line ticks the open item with that number (`✔ You 2-3`, `✔ You 2-3 Run the migration`, `✔ You 2-1, 2-3`). A number that matches no open item ticks nothing, and the text after it is not matched.
+- A `✔ You <item>` line without a leading number ticks the open item with that text. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins.
+- `✓`, `✅` and `☑` work like `✔`. `✔ Done` and `✔ Checked` (with any of them) never tick anything.
 - Lines inside code fences are skipped.
 - Repeats are matched with case and whitespace ignored.
 
 ## Checklist state per prompt
 
-With each prompt you send, Claude also gets the checklist as it stands: the open items and the ones ticked off. It is told not to repeat them unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <item>`. With an empty checklist nothing is sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
+With a prompt you send, Claude also gets the checklist as it stands, with item numbers: the open items, the ones you ticked and the ones its last reply closed. A tick of yours means you read the item, not that it is done: Claude may still mention it if it needs doing, but does not list it again unless it changed. It is told not to repeat items unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <number>`. With an empty checklist nothing is sent.
+
+At most the 10 newest open items are sent; with more, Claude is told how many older ones were left out and to ask you to tick off what is done. The pane keeps them all.
+
+The state is sent only when it changed since the last one sent (a new item, a tick by you or a reply). It is sent again at the start of a conversation, after a compaction and after `/clear` or `/resume`. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
 
 The reply format is added to every conversation, subagents too, as the API offers no way to limit it to the main one. It says to follow another format as a subagent or when one is asked.
 
@@ -69,7 +77,7 @@ There is one JSON file per session:
 $CLAUDE_CONFIG_DIR/tldr-checklist/sessions/<session-id>.json
 ```
 
-If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, items: [{ id, text, done, firstSeenTurn }] }`. The file is written after every turn and every tick. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
+If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, items: [{ id, text, done, firstSeenTurn, ref, tickedBy }] }`; `tickedBy` is `user` or `reply` on a ticked item. A file from before item numbers loads with numbers derived from `firstSeenTurn` and the order of the items. The file is written after every turn and every tick. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
 
 ## Develop
 

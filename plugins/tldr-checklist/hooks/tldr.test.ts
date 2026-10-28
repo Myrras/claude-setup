@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, FORMAT, normalize, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, emptyDoc, FORMAT, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -270,9 +270,9 @@ describe('panelState', () => {
     let doc = applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You Review the PR'))
     doc = toggle(doc, doc.items[1]!.id)
     const text = panelState(doc)!
-    expect(text).toContain('Open:\n- Run the migration')
-    expect(text).toContain('Ticked off:\n- Review the PR')
-    expect(text).toContain('close it with a line: ✔ You <item text>')
+    expect(text).toContain('Open:\n- 1-1 Run the migration')
+    expect(text).toContain('Ticked by the user (read; not necessarily done):\n- 1-2 Review the PR')
+    expect(text).toContain('close it with a line: ✔ You <number>')
     expect(text.split('\n').some(line => parseReply(line).you.length || parseReply(line).closed.length)).toBe(false)
     const ticked = panelState(toggle(doc, doc.items[0]!.id))!
     expect(ticked).not.toContain('Open:')
@@ -281,6 +281,132 @@ describe('panelState', () => {
 
   test('says nothing for an empty checklist', () => {
     expect(panelState(emptyDoc('s1'))).toBeUndefined()
+  })
+})
+
+describe('item numbers', () => {
+  const refs = (doc: Doc) => doc.items.map(i => [i.text, i.ref])
+
+  test('each reply numbers its new items from 1; existing items keep theirs', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You A\n→ You B'))
+    expect(refs(doc)).toEqual([
+      ['A', '1-1'],
+      ['B', '1-2'],
+    ])
+    doc = applyReply(doc, parseReply('→ You B\n→ You C\n→ You D'))
+    expect(refs(doc)).toEqual([
+      ['A', '1-1'],
+      ['B', '1-2'],
+      ['C', '2-1'],
+      ['D', '2-2'],
+    ])
+  })
+
+  test('numbers never shift when items drop; a re-added item gets a new one', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You A\n→ You B'))
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('→ You C'))
+    expect(refs(doc)).toEqual([
+      ['B', '1-2'],
+      ['C', '2-1'],
+    ])
+    doc = applyReply(doc, parseReply('→ You A'))
+    expect(refs(doc)).toEqual([
+      ['B', '1-2'],
+      ['C', '2-1'],
+      ['A', '3-1'],
+    ])
+  })
+
+  test('state without numbers loads with numbers from turn and order, skipping taken ones', () => {
+    const old = (text: string, firstSeenTurn: number, extra = {}) => ({ id: text, text, done: false, firstSeenTurn, ...extra })
+    const text = JSON.stringify({ ...emptyDoc('s1'), turn: 3, items: [old('A', 1), old('B', 2, { done: true }), old('C', 2), old('D', 2, { ref: '2-1' })] })
+    expect(refs(parseDoc(text, 's1')!)).toEqual([
+      ['A', '1-1'],
+      ['B', '2-2'],
+      ['C', '2-3'],
+      ['D', '2-1'],
+    ])
+  })
+})
+
+describe('closing by number', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You Review the PR\n→ You Review the docs'))
+  const done = (doc: Doc) => doc.items.filter(i => i.done).map(i => i.ref)
+
+  test('✔ You <number> ticks the item with that number, text after it or not', () => {
+    expect(done(applyReply(start(), parseReply('✔ You 1-3')))).toEqual(['1-3'])
+    expect(done(applyReply(start(), parseReply('✔ You 1-2 Review the PR')))).toEqual(['1-2'])
+    expect(done(applyReply(start(), parseReply('✔ You: `1-2`.')))).toEqual(['1-2'])
+    expect(done(applyReply(start(), parseReply('✔ You 1-1, 1-3')))).toEqual(['1-1', '1-3'])
+  })
+
+  test('an unknown number ticks nothing, and its text is not matched', () => {
+    expect(done(applyReply(start(), parseReply('✔ You 9-9 Run the migration')))).toEqual([])
+    expect(done(applyReply(start(), parseReply('✔ You 1-1-2')))).toEqual([])
+  })
+
+  test('a line without a leading number still matches by text', () => {
+    expect(done(applyReply(start(), parseReply('✔ You Run the migration')))).toEqual(['1-1'])
+  })
+
+  test('✅ and ☑ close too, ✅ Done and ✅ Checked do not', () => {
+    const reply = parseReply('✅ You A\n☑ You B\n☑️ You C\n✅️ You D\n✅ Done Run the migration\n✅ Checked Review the PR\n☑ Done x')
+    expect(reply.closed).toEqual(['A', 'B', 'C', 'D'])
+    expect(done(applyReply(start(), parseReply('✅ Done Run the migration\n✅ Checked 1-2')))).toEqual([])
+    expect(done(applyReply(start(), parseReply('✅ You 1-1\n☑️ You Review the PR')))).toEqual(['1-1', '1-2'])
+  })
+})
+
+describe('who ticked it', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You A\n→ You B\n→ You C'))
+
+  test('a click ticks as the user and unticking clears it; a reply close ticks as the reply', () => {
+    let doc = toggle(start(), start().items[0]!.id)
+    expect(doc.items[0]?.tickedBy).toBe('user')
+    doc = toggle(doc, doc.items[0]!.id)
+    expect(doc.items[0]?.done).toBe(false)
+    expect(doc.items[0]?.tickedBy).toBeUndefined()
+    doc = applyReply(start(), parseReply('✔ You 1-2'))
+    expect(doc.items[1]?.tickedBy).toBe('reply')
+  })
+
+  test('panelState lists user ticks and reply closes apart', () => {
+    let doc = applyReply(start(), parseReply('✔ You 1-2'))
+    const closedOnly = panelState(doc)!
+    expect(closedOnly).toContain('Closed in your last reply:\n- 1-2 B')
+    expect(closedOnly).not.toContain('Ticked by the user')
+    expect(closedOnly).not.toContain('A user tick')
+    doc = toggle(doc, doc.items[2]!.id)
+    const text = panelState(doc)!
+    expect(text).toContain('Open:\n- 1-1 A\n\n')
+    expect(text).toContain('Ticked by the user (read; not necessarily done):\n- 1-3 C')
+    expect(text).toContain('Closed in your last reply:\n- 1-2 B')
+    expect(text).toContain('A user tick means read, not done')
+    expect(text.split('\n').some(line => parseReply(line).you.length || parseReply(line).closed.length)).toBe(false)
+  })
+})
+
+describe('open cap', () => {
+  const items = (count: number, prefix: string) => Array.from({ length: count }, (_, i) => `→ You ${prefix} ${i + 1}`).join('\n')
+  const openLines = (text: string) => text.split('Open:\n')[1]!.split('\n\n')[0]!.split('\n')
+
+  test(`sends the ${OPEN_CAP} newest open items and says how many are left out`, () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply(items(10, 'Early')))
+    doc = applyReply(doc, parseReply(items(1, 'Late')))
+    const text = panelState(doc)!
+    expect(openLines(text)).toHaveLength(OPEN_CAP)
+    expect(openLines(text)[0]).toBe('- 1-2 Early 2')
+    expect(openLines(text).at(-2)).toBe('- 1-10 Early 10')
+    expect(openLines(text).at(-1)).toBe('- 2-1 Late 1')
+    expect(text).toContain('1 older open item not shown; ask the user to tick off what is done.')
+    expect(doc.items).toHaveLength(11)
+  })
+
+  test(`${OPEN_CAP} open items are all sent`, () => {
+    const text = panelState(applyReply(emptyDoc('s1'), parseReply(items(10, 'Item'))))!
+    expect(openLines(text)).toHaveLength(OPEN_CAP)
+    expect(text).not.toContain('not shown')
   })
 })
 
@@ -404,7 +530,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const id = saved()!.items[0]!.id
     await ui.press({ key: id })
     expect(saved()?.items[0]?.done).toBe(true)
-    const ticked = await ui.find({ type: 'Text', text: /\[x\] Run the migration/ })
+    const ticked = await ui.find({ type: 'Text', text: /\[x\] 1-1 Run the migration/ })
     expect(ticked?.props.strikethrough).toBe(true)
     await ui.unmount()
 
@@ -440,8 +566,8 @@ test('state saved by an earlier session is loaded at start', async ($, on) => {
   files.set(FILE, JSON.stringify(earlier))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /\[x\] Review the PR/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /\[ \] Run the migration/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\[x\] 1-2 Review the PR/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /\[ \] 1-1 Run the migration/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -595,9 +721,9 @@ test('each prompt carries the checklist: open and ticked items, nothing when emp
   const result = await $.prompt.submit(PROMPT)
   expect(result.text).toBe('next step?')
   expect(result.context).toHaveLength(1)
-  expect(result.context![0]).toContain('Open:\n- Run the migration')
-  expect(result.context![0]).toContain('Ticked off:\n- Review the PR')
-  expect(result.context![0]).toContain('✔ You <item text>')
+  expect(result.context![0]).toContain('Open:\n- 1-1 Run the migration')
+  expect(result.context![0]).toContain('Ticked by the user (read; not necessarily done):\n- 1-2 Review the PR')
+  expect(result.context![0]).toContain('✔ You <number>')
 
   // A ✔ You reply closes the last open item; the ticks drop with the reply after.
   await $.turn.complete(turn('TL;DR done\n✔ You Run the migration', 't2'))
@@ -631,4 +757,65 @@ test('with inject off, neither the format nor the checklist is sent', { options:
   await $.turn.complete(turn(REPLY_1, 't1'))
   await clock.settle()
   expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+})
+
+const many = (count: number) => Array.from({ length: count }, (_, i) => `→ You Item ${i + 1}`).join('\n')
+
+test(`the pane warns from ${OPEN_CAP} open items on`, async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(many(OPEN_CAP - 1), 't1'))
+  await clock.settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /open items — tick off/ })).toBeUndefined()
+  await ui.unmount()
+  await $.turn.complete(turn('→ You One more', 't2'))
+  await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /open items — tick off/ }))?.text).toBe(`${OPEN_CAP}+ open items — tick off what you have read`)
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(OPEN_CAP)
+  await ui.unmount()
+})
+
+test('old state without numbers shows derived numbers in the pane', async ($, on) => {
+  const { files } = world(on, undefined)
+  const old = { id: 'i1', text: 'Run the migration', done: false, firstSeenTurn: 2 }
+  files.set(FILE, JSON.stringify({ ...emptyDoc('s1'), turn: 2, items: [old] }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /\[ \] 2-1 Run the migration/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the checklist state is sent only when it changed, and again after the context is read anew', async ($, on) => {
+  const { clock, files, saved, setId } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+
+  // A new conversation or a compaction reads the context again.
+  await $.prompt.context(CONTEXT)
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+
+  // A user tick changes it.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: (await ui.findAll({ type: 'Button' }))[0]!.key! })
+  await ui.unmount()
+  expect((await $.prompt.submit(PROMPT)).context![0]).toContain('Ticked by the user (read; not necessarily done):\n- 1-1 Run the migration')
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+
+  // So does a close in a reply.
+  await $.turn.complete(turn('✔ You 1-2', 't2'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context![0]).toContain('Closed in your last reply:\n- 1-2 Review the PR')
+
+  // The same checklist in another session is sent again.
+  files.set(FILE.replace('s1', 's2'), JSON.stringify({ ...saved()!, sessionId: 's2' }))
+  setId('s2')
+  await $.session.end(END('s1', 'resume'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 })
