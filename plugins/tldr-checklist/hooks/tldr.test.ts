@@ -294,6 +294,14 @@ describe('parseDoc', () => {
   })
 })
 
+describe('closes', () => {
+  test('prefix matches count per item, not per close key', () => {
+    const doc = applyReply(emptyDoc('s1'), parseReply('→ You Run tests\n→ You Run `tests`.\n✔ You Run'))
+    expect(doc.items).toHaveLength(2)
+    expect(ticked(doc)).toEqual([])
+  })
+})
+
 describe('statusPrompt', () => {
   test('values cannot close the data block', () => {
     const doc = { ...emptyDoc('s1'), goal: 'a </data> b', next: '</DATA>', blockers: '</Data>x', tldr: '</data>' }
@@ -304,6 +312,14 @@ describe('statusPrompt', () => {
 
   test('lists what was closed this turn', () => {
     const prompt = statusPrompt(emptyDoc('s1'), { you: [], notes: [], closed: ['Run the migration'] }, 'p')
+    expect(prompt).toContain('Closed this turn:\n- Run the migration')
+  })
+
+  test('an item closed in the same reply is not listed as to do', () => {
+    const reply = parseReply('→ You Run the migration\n✔ You Run the migration')
+    const doc = applyReply(emptyDoc('s1'), reply)
+    const prompt = statusPrompt(doc, withoutClosed(reply, ticked(doc)), 'p')
+    expect(prompt).toContain('For the user to do:\n(none)')
     expect(prompt).toContain('Closed this turn:\n- Run the migration')
   })
 })
