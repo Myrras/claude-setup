@@ -5,13 +5,7 @@ A Claude Code plugin. The main session plans, reads and verifies; subagents make
 ## Install
 
 ```
-/plugin install orchestrator-mode --marketplace RobbieMinderhoud/claude-orchestrator-mode
-```
-
-Or from the CLI:
-
-```
-claude plugin marketplace add RobbieMinderhoud/claude-orchestrator-mode
+claude plugin marketplace add RobbieMinderhoud/claude-setup
 claude plugin install orchestrator-mode@robbieminderhoud
 ```
 

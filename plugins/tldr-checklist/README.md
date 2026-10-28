@@ -31,11 +31,11 @@ Try it for one session:
 claude --plugin-dir /path/to/claude-tldr-checklist
 ```
 
-Or install it from a local marketplace:
+Or install it from the marketplace:
 
 ```
-claude plugin marketplace add /path/to/claude-tldr-checklist
-claude plugin install tldr-checklist@tldr-checklist
+claude plugin marketplace add RobbieMinderhoud/claude-setup
+claude plugin install tldr-checklist@robbieminderhoud
 ```
 
 ## Usage
