@@ -3,7 +3,8 @@ import type { Doc, Item, Status } from '../types'
 export type Reply = { tldr?: string; you: string[]; notes: string[] }
 
 const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
-const BULLET = /^\s*(?:[-*+]\s+)?/
+// Blockquote prefixes, then a bullet or a numbered-list marker.
+const BULLET = /^\s*(?:>\s*)*(?:(?:[-*+]|\d+[.)])\s+)?/
 // Tag, then ':' or whitespace; markdown emphasis (** __ * _) may wrap the tag, with the colon inside or out.
 const EM = '(?:\\*\\*|__|\\*|_)?'
 // Groups: 1 opening marks, 2-4 marks right after the tag (the tag was closed there), 5 text.

@@ -19,42 +19,61 @@ async function stateFile($: EngineInterface, sessionId: string): Promise<string 
   return config ? `${config}/tldr-checklist/sessions/${sessionId}.json` : undefined
 }
 
-// A state file that exists but cannot be read is never overwritten with an empty doc.
-let unreadable: string | undefined
+// The session whose state file could not be read; it is never overwritten. An atom, so it survives a code reload.
+const unreadable = atom({ plugin: 'tldr-checklist', key: 'unreadable' } as const, '')
+
+// A doc from a failed read, kept in memory, joins the file once it reads again.
+function merge(file: Doc, held: Doc): Doc {
+  const ids = new Set(file.items.map(item => item.id))
+  const pick = (key: 'tldr' | 'goal' | 'next' | 'blockers') => held[key] || file[key]
+  return {
+    ...file,
+    turn: Math.max(file.turn, held.turn),
+    tldr: pick('tldr'),
+    goal: pick('goal'),
+    next: pick('next'),
+    blockers: pick('blockers'),
+    items: [...file.items, ...held.items.filter(item => !ids.has(item.id))],
+  }
+}
 
 // The session id changes on /clear and /resume; the doc follows it, loading that session's file.
 async function current($: EngineInterface): Promise<Doc> {
   const sessionId = await $.session.id()
   const held = await read($, doc)
-  if (held.sessionId === sessionId) return held
+  const stuck = (await read($, unreadable)) === sessionId
+  if (held.sessionId === sessionId && !stuck) return held
   const file = await stateFile($, sessionId)
-  const fail = (why: string) => {
-    unreadable = sessionId
-    $.ui.log(`tldr-checklist: could not read state, it is left as is (${why})`)
-  }
   let loaded = emptyDoc(sessionId)
+  let failed = false
   if (file && (await $.fs.exists(file))) {
     const text = await $.fs.read(file).catch(error => {
-      fail(String(error))
+      failed = true
+      if (!stuck) $.ui.log(`tldr-checklist: could not read state, it is left as is (${String(error)})`)
       return undefined
     })
     if (text !== undefined) {
       const parsed = parseDoc(text, sessionId)
-      if (parsed) {
-        loaded = parsed
-        if (unreadable === sessionId) unreadable = undefined
-      } else fail('not valid JSON')
+      if (parsed) loaded = parsed
+      else {
+        await $.fs.write(`${file}.corrupt`, text).catch(error => $.ui.log(`tldr-checklist: could not keep the corrupt state (${String(error)})`))
+        $.ui.log(`tldr-checklist: state file was corrupt, kept as ${sessionId}.json.corrupt`)
+      }
     }
   }
-  return update($, doc, v => (v.sessionId === sessionId ? v : loaded))
+  if (failed) await update($, unreadable, () => sessionId)
+  else if (stuck) await update($, unreadable, () => '')
+  const result = await update($, doc, v => (v.sessionId !== sessionId ? loaded : failed ? v : stuck ? merge(loaded, v) : v))
+  if (stuck && !failed) await save($, result)
+  return result
 }
 
 // Writes go one after another so an older doc never lands after a newer one.
 let saving: Promise<void> = Promise.resolve()
 let warned = false
 
-function save($: EngineInterface, value: Doc): Promise<void> {
-  if (!value.sessionId || value.sessionId === unreadable) return saving
+async function save($: EngineInterface, value: Doc): Promise<void> {
+  if (!value.sessionId || value.sessionId === (await read($, unreadable))) return saving
   saving = saving
     .then(async () => {
       const file = await stateFile($, value.sessionId)
@@ -83,6 +102,7 @@ async function refreshStatus(
   userPrompt: string,
 ): Promise<void> {
   const held = await read($, doc)
+  if (turn !== statusTurn || held.sessionId !== sessionId) return
   const prompt = statusPrompt(held, reply, userPrompt)
   const answer = await $.model.complete({ model: 'haiku', prompt, maxTokens: 300, timeoutMs: 30000 })
   const status = answer.isAnswered ? parseStatus(answer.text) : undefined
@@ -93,16 +113,14 @@ async function refreshStatus(
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    try {
-      await $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' })
-      await current($)
-      await update($, interactive, () => e.isInteractive)
-      if (e.isInteractive) {
-        $.ui.open({ id: PANE, title: TITLE }).catch(error => $.ui.log(`tldr-checklist: could not open pane (${String(error)})`))
-      }
-    } catch (error) {
-      $.ui.log(`tldr-checklist: could not start (${String(error)})`)
-    }
+    const step = (what: string, fn: () => unknown) =>
+      Promise.resolve()
+        .then(fn)
+        .catch(error => $.ui.log(`tldr-checklist: could not ${what} (${String(error)})`))
+    await step('save settings', () => update($, interactive, () => e.isInteractive))
+    if (e.isInteractive) await step('open pane', () => $.ui.open({ id: PANE, title: TITLE }))
+    await step('register command', () => $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' }))
+    await step('load state', () => current($))
 
     return next(e)
   })
@@ -123,8 +141,8 @@ export const register: Register = on => {
         $.session
           .id()
           .then(id => {
-            if (id !== e.sessionId) return current($)
-            if (left > 1) $.clock.after(100, () => check(left - 1))
+            if (id !== e.sessionId || left <= 1) return current($)
+            $.clock.after(100, () => check(left - 1))
           })
           .catch(error => $.ui.log(`tldr-checklist: could not load state (${String(error)})`))
       }
@@ -141,20 +159,24 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'answer' || !(await read($, interactive))) return done
-    const reply = parseReply(e.answer)
-    const prompt = await read($, lastPrompt)
-    const { sessionId } = await current($)
-    const updated = await change($, value => applyReply(value, reply))
-    if (!reply.tldr && !reply.you.length && !reply.notes.length) return done
-    const { turn } = updated
-    statusTurn = turn
-    // The status call runs after the turn so it never holds up the prompt.
-    $.clock.after(0, () => {
-      refreshStatus($, reply, sessionId, turn, prompt).catch(error =>
-        $.ui.log(`tldr-checklist: could not refresh status (${String(error)})`),
-      )
-    })
+    try {
+      if (e.agentId !== undefined || e.reason !== 'answer' || !(await read($, interactive))) return done
+      const reply = parseReply(e.answer)
+      const prompt = await read($, lastPrompt)
+      const { sessionId } = await current($)
+      const updated = await change($, value => applyReply(value, reply))
+      if (!reply.tldr && !reply.you.length && !reply.notes.length) return done
+      const { turn } = updated
+      statusTurn = turn
+      // The status call runs after the turn so it never holds up the prompt.
+      $.clock.after(0, () => {
+        refreshStatus($, reply, sessionId, turn, prompt).catch(error =>
+          $.ui.log(`tldr-checklist: could not refresh status (${String(error)})`),
+        )
+      })
+    } catch (error) {
+      $.ui.log(`tldr-checklist: could not update the checklist (${String(error)})`)
+    }
 
     return done
   })

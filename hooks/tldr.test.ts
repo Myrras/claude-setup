@@ -75,6 +75,14 @@ describe('parseReply', () => {
     expect(parseReply(`~~~\n\`\`\`\n${inside}\n~~~~\n→ You shown`).you).toEqual(['shown'])
   })
 
+  test('strips numbered-list and blockquote prefixes', () => {
+    expect(parseReply('1. → You run migrations').you).toEqual(['run migrations'])
+    expect(parseReply('2) → You run migrations').you).toEqual(['run migrations'])
+    expect(parseReply('> → You deploy').you).toEqual(['deploy'])
+    expect(parseReply('> > - → You deploy').you).toEqual(['deploy'])
+    expect(parseReply('> ```\n> → You hidden\n> ```\n→ You shown').you).toEqual(['shown'])
+  })
+
   test('a fence may open on a bullet line', () => {
     expect(parseReply('- ```bash\n  → You hidden\n  ```\n\n→ You run the tests').you).toEqual(['run the tests'])
   })
@@ -167,14 +175,19 @@ describe('parseStatus', () => {
   })
 })
 
-function world(on: On, status: string | undefined, unreadable = false) {
+function world(on: On, status: string | undefined, startUnreadable = false, broken: 'exists' | 'register' | '' = '') {
+  let unreadable = startUnreadable
   const files = new Map<string, string>()
   let id = 's1'
   mock.env(on, { HOME: '/home/me' })
   const clock = mock.clock(on)
   on('session.id', () => ({ value: id }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
-  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('ui.log', () => ({ value: undefined }))
+  on('fs.exists', (_, e) => {
+    if (broken === 'exists') throw new Error('boom')
+    return { value: files.has(e.path) }
+  })
   on('fs.read', (_, e) => {
     if (unreadable) throw new Error('EACCES')
     return { value: files.get(e.path) ?? '' }
@@ -189,7 +202,10 @@ function world(on: On, status: string | undefined, unreadable = false) {
         ? { isAnswered: false as const, reason: 'empty-reply' as const, usage: USAGE }
         : { isAnswered: true as const, text: status, usage: USAGE },
   }))
-  on('command.register', () => ({ value: { command: 'tldr' } }))
+  on('command.register', () => {
+    if (broken === 'register') throw new Error('boom')
+    return { value: { command: 'tldr' } }
+  })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -197,7 +213,10 @@ function world(on: On, status: string | undefined, unreadable = false) {
   const setId = (next: string) => {
     id = next
   }
-  return { files, clock, saved, setId }
+  const setUnreadable = (value: boolean) => {
+    unreadable = value
+  }
+  return { files, clock, saved, setId, setUnreadable }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -269,13 +288,61 @@ test('an unreadable state file is not overwritten', async ($, on) => {
   expect(files.get(FILE)).toBe('keep me')
 })
 
-test('a state file that is not valid JSON is not overwritten', async ($, on) => {
-  const { clock, files } = world(on, '{"goal":"g"}')
-  files.set(FILE, '{"turn": 3, "items": [')
+for (const [name, bad] of [['truncated', '{"turn": 3, "items": ['], ['empty', '']] as const) {
+  test(`a ${name} state file is kept as .corrupt and replaced`, async ($, on) => {
+    const { clock, files, saved } = world(on, '{"goal":"g"}')
+    files.set(FILE, bad)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn(REPLY_1, 't1'))
+    await clock.settle()
+    expect(files.get(`${FILE}.corrupt`)).toBe(bad)
+    expect(saved()?.tldr).toBe('Added the export endpoint')
+  })
+}
+
+test('an unreadable file is read again later and merged with the held doc', async ($, on) => {
+  const { clock, files, saved, setUnreadable } = world(on, undefined, true)
+  const onDisk = applyReply(emptyDoc('s1'), parseReply('TL;DR old\n→ You Run the migration'))
+  files.set(FILE, JSON.stringify({ ...onDisk, goal: 'File goal', next: 'File next' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete(turn(REPLY_1, 't1'))
   await clock.settle()
-  expect(files.get(FILE)).toBe('{"turn": 3, "items": [')
+  expect(files.get(FILE)).toContain('File goal')
+  expect(saved()?.items).toHaveLength(1)
+  setUnreadable(false)
+  await $.turn.complete(turn('TL;DR Later\n→ You Deploy to staging', 't2'))
+  await clock.settle()
+  expect(saved()?.items.map(i => i.text)).toEqual(['Run the migration', 'Review the PR', 'Deploy to staging'])
+  expect(saved()?.tldr).toBe('Later')
+  expect(saved()?.goal).toBe('File goal')
+  expect(saved()?.turn).toBe(2)
+})
+
+test('a failing step in turn.complete does not break the turn', async ($, on) => {
+  const { clock } = world(on, undefined, false, 'exists')
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+})
+
+test('session.start survives a failing step', async ($, on) => {
+  const { files } = world(on, undefined, false, 'register')
+  files.set(FILE, JSON.stringify({ ...emptyDoc('s1'), tldr: 'Kept' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Kept/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('/resume back to the same id still loads the state', async ($, on) => {
+  const { clock, files } = world(on, undefined)
+  files.set(FILE, JSON.stringify({ ...emptyDoc('s1'), tldr: 'Same id' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.end(END('s1', 'resume'))
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Same id/ })).toBeDefined()
+  await ui.unmount()
 })
 
 const END = (sessionId: string, reason: 'clear' | 'resume') => ({ reason, sessionId, resume: { id: sessionId } }) as const

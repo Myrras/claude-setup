@@ -50,7 +50,7 @@ There is one JSON file per session:
 $CLAUDE_CONFIG_DIR/tldr-checklist/sessions/<session-id>.json
 ```
 
-If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, items: [{ id, text, done, firstSeenTurn }] }`. The file is written after every turn and every tick. It is read at session start, on `/tldr`, and when the session id changes (`/clear`, `/resume`).
+If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, items: [{ id, text, done, firstSeenTurn }] }`. The file is written after every turn and every tick. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
 
 ## Develop
 
