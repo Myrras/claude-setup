@@ -11,10 +11,12 @@ const TITLE = 'TL;DR'
 // Change the tag when Doc's fields change: an older value then reads as empty.
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-1' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
+const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
 
-async function stateFile($: EngineInterface, sessionId: string): Promise<string> {
-  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('HOME')}/.claude`
-  return `${config}/tldr-checklist/sessions/${sessionId}.json`
+async function stateFile($: EngineInterface, sessionId: string): Promise<string | undefined> {
+  const home = await $.env.get('HOME')
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || (home ? `${home}/.claude` : '')
+  return config ? `${config}/tldr-checklist/sessions/${sessionId}.json` : undefined
 }
 
 // The session id changes on /clear and /resume; the doc follows it, loading that session's file.
@@ -23,18 +25,24 @@ async function current($: EngineInterface): Promise<Doc> {
   const held = await read($, doc)
   if (held.sessionId === sessionId) return held
   const file = await stateFile($, sessionId)
-  const text = (await $.fs.exists(file)) ? await $.fs.read(file).catch(() => '') : ''
+  const text = file && (await $.fs.exists(file)) ? await $.fs.read(file).catch(() => '') : ''
   const loaded = text ? parseDoc(text, sessionId) : emptyDoc(sessionId)
-  return update($, doc, () => loaded)
+  return update($, doc, v => (v.sessionId === sessionId ? v : loaded))
 }
 
 // Writes go one after another so an older doc never lands after a newer one.
 let saving: Promise<void> = Promise.resolve()
+let warned = false
 
 function save($: EngineInterface, value: Doc): Promise<void> {
   if (!value.sessionId) return saving
   saving = saving
-    .then(async () => $.fs.write(await stateFile($, value.sessionId), `${JSON.stringify(value, null, 2)}\n`))
+    .then(async () => {
+      const file = await stateFile($, value.sessionId)
+      if (file) return $.fs.write(file, `${JSON.stringify(value, null, 2)}\n`)
+      if (!warned) $.ui.log('tldr-checklist: no CLAUDE_CONFIG_DIR or HOME, state is not saved')
+      warned = true
+    })
     .catch(error => $.ui.log(`tldr-checklist: could not save state (${String(error)})`))
   return saving
 }
@@ -43,20 +51,30 @@ async function change($: EngineInterface, fn: (value: Doc) => Doc): Promise<void
   await save($, await update($, doc, fn))
 }
 
-async function refreshStatus($: EngineInterface, reply: Reply, sessionId: string): Promise<void> {
+async function refreshStatus(
+  $: EngineInterface,
+  reply: Reply,
+  sessionId: string,
+  turn: number,
+  userPrompt: string,
+): Promise<void> {
   const held = await read($, doc)
-  const prompt = statusPrompt(held, reply, await read($, lastPrompt))
+  const prompt = statusPrompt(held, reply, userPrompt)
   const answer = await $.model.complete({ model: 'haiku', prompt, maxTokens: 300, timeoutMs: 30000 })
   const status = answer.isAnswered ? parseStatus(answer.text) : undefined
   if (!status) return
-  await change($, value => (value.sessionId === sessionId ? { ...value, ...status } : value))
+  // A newer turn may have completed during the model call; its status wins.
+  await change($, value => (value.sessionId === sessionId && value.turn === turn ? { ...value, ...status } : value))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' })
     await current($)
-    void $.ui.open({ id: PANE, title: TITLE })
+    await update($, interactive, () => e.isInteractive)
+    if (e.isInteractive) {
+      $.ui.open({ id: PANE, title: TITLE }).catch(error => $.ui.log(`tldr-checklist: could not open pane (${String(error)})`))
+    }
 
     return next(e)
   })
@@ -72,7 +90,9 @@ export const register: Register = on => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, doc, () => emptyDoc(''))
-      $.clock.after(0, () => void current($))
+      $.clock.after(0, () => {
+        current($).catch(error => $.ui.log(`tldr-checklist: could not load state (${String(error)})`))
+      })
     }
     return ended
   })
@@ -85,12 +105,19 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'answer') return done
+    if (e.agentId !== undefined || e.reason !== 'answer' || !(await read($, interactive))) return done
     const reply = parseReply(e.answer)
+    const prompt = await read($, lastPrompt)
     const { sessionId } = await current($)
-    await change($, value => applyReply(value, reply))
+    const updated = await update($, doc, value => applyReply(value, reply))
+    await save($, updated)
+    const { turn } = updated
     // The status call runs after the turn so it never holds up the prompt.
-    $.clock.after(0, () => void refreshStatus($, reply, sessionId))
+    $.clock.after(0, () => {
+      refreshStatus($, reply, sessionId, turn, prompt).catch(error =>
+        $.ui.log(`tldr-checklist: could not refresh status (${String(error)})`),
+      )
+    })
 
     return done
   })

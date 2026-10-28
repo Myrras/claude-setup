@@ -2,11 +2,14 @@ import type { Doc, Item, Status } from '../types'
 
 export type Reply = { tldr?: string; you: string[]; notes: string[] }
 
-const FENCE = /^\s*(```|~~~)/
+const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
 const BULLET = /^\s*(?:[-*+]\s+)?/
-const TLDR = /^TL;DR:?\s+(.*\S)/i
-const YOU = /^→\s*You\s+(.*\S)/
-const NOTE = /^!\s*Note\s+(.*\S)/
+// Tag, then ':' or whitespace; markdown emphasis (** __ * _) may wrap the tag, with the colon inside or out.
+const EM = '(?:\\*\\*|__|\\*|_)?'
+const tag = (name: string, flags = '') => new RegExp(`^${EM}${name}(?:${EM}:${EM}\\s*|${EM}\\s+)(.*\\S)`, flags)
+const TLDR = tag('TL;DR', 'i')
+const YOU = tag('→\\s*You')
+const NOTE = tag('!\\s*Note')
 
 export function normalize(text: string): string {
   return text.trim().replace(/\s+/g, ' ').toLowerCase()
@@ -14,13 +17,17 @@ export function normalize(text: string): string {
 
 export function parseReply(answer: string): Reply {
   const reply: Reply = { you: [], notes: [] }
-  let inFence = false
+  let fence: string | undefined
   for (const raw of answer.split('\n')) {
-    if (FENCE.test(raw)) {
-      inFence = !inFence
+    const marks = FENCE.exec(raw)
+    if (fence === undefined) {
+      if (marks) fence = marks[1]
+      if (marks) continue
+    } else {
+      // CommonMark: only the same character, at least as long, nothing after it closes the fence.
+      if (marks && marks[1]![0] === fence[0] && marks[1]!.length >= fence.length && !marks[2]!.trim()) fence = undefined
       continue
     }
-    if (inFence) continue
     const line = raw.replace(BULLET, '')
     const tldr = TLDR.exec(line)?.[1]
     if (tldr !== undefined && reply.tldr === undefined) reply.tldr = tidy(tldr)

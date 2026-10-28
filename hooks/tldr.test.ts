@@ -47,6 +47,34 @@ describe('parseReply', () => {
     expect(reply.notes).toEqual(['CSV only for now'])
   })
 
+  test('accepts a colon and markdown emphasis around the tags', () => {
+    const tldr = (line: string) => parseReply(line).tldr
+    expect(tldr('TL;DR Fixed it')).toBe('Fixed it')
+    expect(tldr('TL;DR: Fixed it')).toBe('Fixed it')
+    expect(tldr('TL;DR:Fixed it')).toBe('Fixed it')
+    expect(tldr('**TL;DR** done')).toBe('done')
+    expect(tldr('**TL;DR:** done')).toBe('done')
+    const you = (line: string) => parseReply(line).you
+    expect(you('→ You run x')).toEqual(['run x'])
+    expect(you('→ You: run x')).toEqual(['run x'])
+    expect(you('**→ You** deploy')).toEqual(['deploy'])
+    expect(you('**→ You:** deploy')).toEqual(['deploy'])
+    expect(parseReply('! Note risk').notes).toEqual(['risk'])
+    expect(parseReply('**! Note:** risk').notes).toEqual(['risk'])
+  })
+
+  test('does not match longer words', () => {
+    expect(parseReply('TL;DRx\n→ Your thing\n→ Yours: x')).toEqual({ you: [], notes: [] })
+  })
+
+  test('a fence closes only on the same character, enough marks and nothing after', () => {
+    const inside = '→ You hidden'
+    expect(parseReply(`\`\`\`\n~~~\n${inside}\n\`\`\`\n→ You shown`).you).toEqual(['shown'])
+    expect(parseReply(`\`\`\`\`\n\`\`\`\n${inside}\n\`\`\`\`\n→ You shown`).you).toEqual(['shown'])
+    expect(parseReply(`\`\`\`\n\`\`\` x\n${inside}\n\`\`\`\n→ You shown`).you).toEqual(['shown'])
+    expect(parseReply(`~~~\n\`\`\`\n${inside}\n~~~~\n→ You shown`).you).toEqual(['shown'])
+  })
+
   test('a reply without the format yields nothing', () => {
     expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [] })
   })

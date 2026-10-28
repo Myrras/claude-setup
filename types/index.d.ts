@@ -11,6 +11,6 @@ export type Doc = Status & {
 
 declare module 'claude-code' {
   interface PluginState {
-    'tldr-checklist': { doc: Shaped<Doc>; prompt: string }
+    'tldr-checklist': { doc: Shaped<Doc>; prompt: string; interactive: boolean }
   }
 }
