@@ -59,7 +59,9 @@ export function emptyDoc(sessionId: string): Doc {
 
 export function applyReply(doc: Doc, reply: Reply): Doc {
   const turn = doc.turn + 1
-  const seen = new Set(doc.items.map(item => normalize(item.text)))
+  // Ticked items go away with the next reply; a reply that lists one again re-adds it as open.
+  const kept = doc.items.filter(item => !item.done)
+  const seen = new Set(kept.map(item => normalize(item.text)))
   const added: Item[] = []
   for (const text of reply.you) {
     const key = normalize(text)
@@ -67,7 +69,7 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     seen.add(key)
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
   }
-  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items: [...doc.items, ...added] }
+  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items: [...kept, ...added] }
 }
 
 export function toggle(doc: Doc, id: string): Doc {

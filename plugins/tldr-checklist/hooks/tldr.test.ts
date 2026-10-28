@@ -127,11 +127,26 @@ describe('applyReply', () => {
     doc = toggle(doc, first.id)
     doc = applyReply(doc, parseReply(REPLY_2))
     expect(doc.tldr).toBe('Fixed the review comments')
+    // The ticked item is dropped; REPLY_2 lists it again, so it returns as an open item.
     expect(doc.items.map(i => [i.text, i.done, i.firstSeenTurn])).toEqual([
-      ['Run the migration', true, 1],
       ['Review the PR', false, 1],
+      ['run the MIGRATION', false, 2],
       ['Deploy to staging', false, 2],
     ])
+  })
+
+  test('a done item is gone after the next reply, open items stay', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply(REPLY_1))
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('TL;DR next\nno list'))
+    expect(doc.items.map(i => [i.text, i.done])).toEqual([['Review the PR', false]])
+  })
+
+  test('a reply that lists a removed done item again re-adds it as open', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Run the migration'))
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('→ You run the migration'))
+    expect(doc.items.map(i => [i.text, i.done, i.firstSeenTurn])).toEqual([['run the migration', false, 2]])
   })
 
   test('a reply without TL;DR keeps the previous one', () => {
@@ -245,14 +260,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.turn.complete(turn(REPLY_2, 't2'))
     await clock.settle()
     expect(saved()?.items.map(i => [i.text, i.done])).toEqual([
-      ['Run the migration', true],
       ['Review the PR', false],
+      ['run the MIGRATION', false],
       ['Deploy to staging', false],
     ])
 
     ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.findAll({ type: 'Button' })).toHaveLength(3)
-    expect((await ui.find({ type: 'Text', text: /\[x\] Run the migration/ }))?.props.strikethrough).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /\[x\]/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Fixed the review comments/ })).toBeDefined()
     await ui.unmount()
   })

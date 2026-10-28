@@ -118,7 +118,7 @@ export const register: Register = on => {
         .then(fn)
         .catch(error => $.ui.log(`tldr-checklist: could not ${what} (${String(error)})`))
     await step('save settings', () => update($, interactive, () => e.isInteractive))
-    if (e.isInteractive) await step('open pane', () => $.ui.open({ id: PANE, title: TITLE }))
+    if (e.isInteractive) await step('open pane', () => $.ui.open({ id: PANE, title: TITLE, backgroundColor: 'transparent' }))
     await step('register command', () => $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' }))
     await step('load state', () => current($))
 
@@ -127,7 +127,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'tldr' }, async $ => {
     await current($)
-    await $.ui.open({ id: PANE, title: TITLE })
+    await $.ui.open({ id: PANE, title: TITLE, backgroundColor: 'transparent' })
 
     return { text: 'TL;DR pane opened.' }
   })
