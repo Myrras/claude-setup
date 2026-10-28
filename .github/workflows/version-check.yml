@@ -1,0 +1,52 @@
+name: Version check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check plugin version bump
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE...HEAD")
+          plugins=$(echo "$changed" | grep -E '^plugins/[^/]+/' | grep -vE '^plugins/[^/]+/(README\.md|LICENSE|tests/)' | cut -d/ -f2 | sort -u || true)
+          if [ -z "$plugins" ]; then
+            echo "::notice::No plugin changes needing a version bump, skipping version check"
+            exit 0
+          fi
+          failed=0
+          for p in $plugins; do
+            f="plugins/$p/.claude-plugin/plugin.json"
+            [ -f "$f" ] || continue
+            head_v=$(jq -r .version "$f")
+            base_v=""
+            if git cat-file -e "origin/$BASE:$f" 2>/dev/null; then
+              base_v=$(git show "origin/$BASE:$f" | jq -r .version)
+            fi
+            if ! echo "$head_v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::$p: Invalid version '$head_v' (base: '$base_v'), expected X.Y.Z"
+              failed=1
+              continue
+            fi
+            if [ -z "$base_v" ]; then
+              echo "New plugin: $p $head_v"
+              continue
+            fi
+            if [ "$head_v" = "$base_v" ] || [ "$(printf '%s\n%s\n' "$base_v" "$head_v" | sort -V | tail -n1)" != "$head_v" ]; then
+              echo "::error::$p: Version not bumped: head $head_v, base $base_v"
+              failed=1
+              continue
+            fi
+            echo "Version bumped: $p $base_v -> $head_v"
+          done
+          exit $failed
