@@ -5,6 +5,7 @@ Claude Code plugin marketplace.
 ```
 claude plugin marketplace add RobbieMinderhoud/claude-setup
 claude plugin install orchestrator-mode@robbieminderhoud
+claude plugin install tldr-checklist@robbieminderhoud
 ```
 
 Existing installs: run `claude plugin marketplace update robbieminderhoud`, nothing else. The old URL RobbieMinderhoud/claude-orchestrator-mode keeps working via GitHub's redirect.
