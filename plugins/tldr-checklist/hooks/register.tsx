@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, emptyDoc, FORMAT, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, emptyDoc, FORMAT, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 import type { Reply } from './parse'
 
 const PANE = 'tldr-checklist'
@@ -13,8 +13,11 @@ const FORMAT_BLOCK = 'replyFormat'
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-2' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
 const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
-// The checklist state last sent; a prompt sends it only when it changed. Cleared when the context is read again.
-const NOTHING_SENT = { sessionId: '', text: '' }
+// The checklist state last sent, and the prompts since; a prompt sends it only when it changed or
+// RESEND_EVERY prompts passed (the API has no rewind event, and a rewind can drop the message that held it).
+// Cleared on a compaction, /clear and /resume.
+const RESEND_EVERY = 5
+const NOTHING_SENT = { sessionId: '', text: '', count: 0 }
 const sent = atom({ plugin: 'tldr-checklist', key: 'sent' } as const, NOTHING_SENT)
 
 async function stateFile($: EngineInterface, sessionId: string): Promise<string | undefined> {
@@ -27,19 +30,7 @@ async function stateFile($: EngineInterface, sessionId: string): Promise<string 
 const unreadable = atom({ plugin: 'tldr-checklist', key: 'unreadable' } as const, '')
 
 // A doc from a failed read, kept in memory, joins the file once it reads again.
-function merge(file: Doc, held: Doc): Doc {
-  const ids = new Set(file.items.map(item => item.id))
-  const pick = (key: 'tldr' | 'goal' | 'next' | 'blockers') => held[key] || file[key]
-  return {
-    ...file,
-    turn: Math.max(file.turn, held.turn),
-    tldr: pick('tldr'),
-    goal: pick('goal'),
-    next: pick('next'),
-    blockers: pick('blockers'),
-    items: [...file.items, ...held.items.filter(item => !ids.has(item.id))],
-  }
-}
+const merge = mergeDocs
 
 // The session id changes on /clear and /resume; the doc follows it, loading that session's file.
 async function current($: EngineInterface): Promise<Doc> {
@@ -118,10 +109,18 @@ async function refreshStatus(
 export const register: Register = (on, options) => {
   // Off for those who bring their own reply format: nothing is added to what the model reads.
   if (options.inject !== false) {
-    // Once per conversation, sent again after a compaction; the checklist state then goes out again too.
+    // Once per conversation, sent again after a compaction. It fires for subagents too, so it resets nothing.
     on('prompt.context', async ($, e, next) => {
-      await update($, sent, () => NOTHING_SENT).catch(error => $.ui.log(`tldr-checklist: could not reset the sent state (${String(error)})`))
       return next({ ...e, blocks: [...e.blocks.filter(block => block.name !== FORMAT_BLOCK), { name: FORMAT_BLOCK, text: FORMAT }] })
+    })
+
+    // After a compaction the state is gone from the history: send it with the next prompt.
+    on('session.compact', async ($, e, next) => {
+      const result = await next(e)
+      if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages) {
+        await update($, sent, () => NOTHING_SENT).catch(error => $.ui.log(`tldr-checklist: could not reset the sent state (${String(error)})`))
+      }
+      return result
     })
 
     // A prompt carries the checklist when it changed since the last one sent, so replies neither repeat nor miss items.
@@ -131,18 +130,26 @@ export const register: Register = (on, options) => {
       const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
       if (e.command || e.isMeta || e.turnId !== undefined || !typed || !(await read($, interactive))) return next(e)
       let state: string | undefined
+      let plan: { sessionId: string; text: string; send: boolean } | undefined
       try {
         const value = await current($)
         const text = panelState(value) ?? ''
         const last = await read($, sent)
-        if (last.sessionId !== value.sessionId || last.text !== text) {
-          await update($, sent, () => ({ sessionId: value.sessionId, text }))
-          state = text || undefined
-        }
+        const send = last.sessionId !== value.sessionId || last.text !== text || last.count + 1 >= RESEND_EVERY
+        plan = { sessionId: value.sessionId, text, send }
+        if (send) state = text || undefined
       } catch (error) {
         $.ui.log(`tldr-checklist: could not read the checklist (${String(error)})`)
       }
-      return next(state ? { ...e, context: [...(e.context ?? []), state] } : e)
+      const result = await next(state ? { ...e, context: [...(e.context ?? []), state] } : e)
+      // Counted as sent only when the prompt went in.
+      if (plan && !result.drop) {
+        const { sessionId, text, send } = plan
+        await update($, sent, v => (send ? { sessionId, text, count: 0 } : { ...v, count: v.count + 1 })).catch(error =>
+          $.ui.log(`tldr-checklist: could not save the sent state (${String(error)})`),
+        )
+      }
+      return result
     })
   }
 

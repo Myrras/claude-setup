@@ -14,8 +14,13 @@ const YOU = tag('→\\s*You', 'i')
 const NOTE = tag('!\\s*Note', 'i')
 // ✔, ✓, ✅ or ☑, optionally in emoji presentation; `✔ Done` and `✔ Checked` do not match.
 const CLOSE = tag('[✔✓✅☑]\\uFE0F?\\s*You', 'i')
-// Leading item numbers of a close (`2-3`, `2-1, 2-3`), then the end or a non-word character.
-const REFS = /^\d+-\d+(?:\s*,\s*\d+-\d+)*(?=$|[^\p{L}\p{N}'’-])/u
+// Leading item numbers of a close (`2-3`, `#2-3`, `2–3`, `2-1, 2-3`, `2-1 2-3`, `2-1 and 2-3`, `2-1 & 2-3`),
+// then the end or a non-word character.
+const REF = '#?\\d+[-–]\\d+'
+const REFS = new RegExp(`^${REF}(?:(?:\\s*[,&]\\s*|\\s+and\\s+|\\s+)${REF})*(?=$|[^\\p{L}\\p{N}'’-])`, 'u')
+// A leading item number on a → You line, with the whitespace after it.
+const LEAD_REF = /^#?(\d+)[-–](\d+)\s+(?=\S)/
+const VALID_REF = /^\d+-\d+$/
 
 // Most open items sent with a prompt; the pane warns from this many on.
 export const OPEN_CAP = 10
@@ -90,7 +95,7 @@ export function panelState(doc: Doc): string | undefined {
   const parts = ['The → You checklist in the side panel:']
   if (shown.length) parts.push(`Open:\n${list(shown)}`)
   const hidden = open.length - shown.length
-  if (hidden) parts.push(`${hidden} older open item${hidden === 1 ? '' : 's'} not shown; ask the user to tick off what is done.`)
+  if (hidden) parts.push(`${hidden} older open item${hidden === 1 ? '' : 's'} not shown; ask the user to tick off what is done, or close one with ✔ You <item text>.`)
   if (read.length) parts.push(`Ticked by the user (read; not necessarily done):\n${list(read)}`)
   if (closed.length) parts.push(`Closed in your last reply:\n${list(closed)}`)
   const rules = [
@@ -101,6 +106,10 @@ export function panelState(doc: Doc): string | undefined {
   if (read.length) rules.push('A user tick means read, not done: mention such an item only if it still needs doing.')
   parts.push(rules.join('\n'))
   return parts.join('\n\n')
+}
+
+function refTurn(ref: string): number {
+  return Number(ref.split('-')[0])
 }
 
 // Oldest first: by the reply that added the item, then its place in that reply.
@@ -120,18 +129,25 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
   // A `✔ You` line then ticks an item, one the same reply lists included; it stays until the reply after.
   const kept = doc.items.filter(item => !item.done)
   const seen = new Set(kept.map(item => normalize(item.text)))
+  const byRefs = new Map(doc.items.map(item => [item.ref, item]))
   // An item number is the reply's turn and the item's place among the ones that reply added; never reused.
   const added: Item[] = []
-  for (const text of reply.you) {
+  for (const line of reply.you) {
+    // A line that starts with the number of an existing item is that item, listed again.
+    const lead = LEAD_REF.exec(line)
+    const known = lead ? byRefs.get(`${lead[1]}-${lead[2]}`) : undefined
+    if (known && !known.done) continue
+    const text = lead && known ? line.slice(lead[0].length) : line
     const key = normalize(text)
     if (seen.has(key)) continue
     seen.add(key)
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${added.length + 1}` })
   }
   const open = [...kept, ...added]
-  const every = [...new Map([...doc.items, ...open].map(item => [item.id, item])).values()].map(item => closeKey(item.text))
-  const all = new Set(every)
-  const items = open.map(item => (closes(reply.closed, item, all, every) ? { ...item, done: true, tickedBy: 'reply' as const } : item))
+  const every = [...new Map([...doc.items, ...open].map(item => [item.id, item])).values()]
+  const keys = every.map(item => closeKey(item.text))
+  const known = { all: new Set(keys), every: keys, refs: new Set(every.map(item => item.ref)) }
+  const items = open.map(item => (closes(reply.closed, item, known) ? { ...item, done: true, tickedBy: 'reply' as const } : item))
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
 }
 
@@ -152,16 +168,20 @@ function closeKey(text: string): string {
 }
 
 // `✔ You <number>` closes the item with that number; text after the number is ignored.
+// Numbers that match no item at all are no numbers: the line is then matched by its text.
 // `✔ You <text>` closes the item with that text, or the one item whose first words it is.
 // Text that equals any item never prefix-matches another; a prefix ends at a non-word character
 // (letters, digits, - and ' are word characters) and is ambiguous when it fits several of all items.
-function closes(closed: string[], item: Item, all: Set<string>, every: string[]): boolean {
+function closes(closed: string[], item: Item, { all, every, refs: known }: { all: Set<string>; every: string[]; refs: Set<string> }): boolean {
   const key = closeKey(item.text)
   return closed.some(text => {
     const want = closeKey(text)
     if (!want) return false
     const refs = REFS.exec(want)
-    if (refs) return refs[0].split(',').some(ref => ref.trim() === item.ref)
+    if (refs) {
+      const wanted = refs[0].match(/\d+[-–]\d+/g)!.map(ref => ref.replace('–', '-'))
+      if (wanted.some(ref => known.has(ref))) return wanted.includes(item.ref)
+    }
     if (want === key) return true
     if (all.has(want)) return false
     const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}'’-]/u.test(other[want.length] ?? ' ')
@@ -184,7 +204,8 @@ export function parseDoc(text: string, sessionId: string): Doc | undefined {
     const str = (v: unknown) => (typeof v === 'string' ? v : '')
     return {
       sessionId,
-      turn: typeof value.turn === 'number' ? value.turn : 0,
+      // At least the highest item number's turn, so a new number never reuses an old one.
+      turn: Math.max(typeof value.turn === 'number' ? value.turn : 0, ...items.map(item => refTurn(item.ref))),
       tldr: str(value.tldr),
       goal: str(value.goal),
       next: str(value.next),
@@ -257,7 +278,7 @@ function clip(text: string, max: number): string {
 }
 
 // State from before item numbers has no `ref` or `tickedBy`.
-type Stored = Omit<Item, 'ref'> & { ref?: string }
+type Stored = Omit<Item, 'ref'> & { ref?: unknown }
 
 function isItem(value: unknown): value is Stored {
   const item = value as Stored
@@ -268,17 +289,17 @@ function isItem(value: unknown): value is Stored {
     typeof item.text === 'string' &&
     typeof item.done === 'boolean' &&
     typeof item.firstSeenTurn === 'number' &&
-    (item.ref === undefined || typeof item.ref === 'string') &&
     (item.tickedBy === undefined || item.tickedBy === 'user' || item.tickedBy === 'reply')
   )
 }
 
 // A missing number is derived from the turn and the item's order in it, skipping the numbers taken there.
 function withRefs(items: Stored[]): Item[] {
-  const taken = new Set(items.map(item => item.ref))
+  const valid = (ref: unknown): ref is string => typeof ref === 'string' && VALID_REF.test(ref)
+  const taken = new Set(items.map(item => item.ref).filter(valid))
   const last = new Map<number, number>()
   return items.map(item => {
-    if (item.ref !== undefined) return { ...item, ref: item.ref }
+    if (valid(item.ref)) return { ...item, ref: item.ref }
     const turn = item.firstSeenTurn
     let n = (last.get(turn) ?? 0) + 1
     while (taken.has(`${turn}-${n}`)) n++
@@ -292,4 +313,22 @@ function idOf(key: string): string {
   let hash = 5381
   for (let i = 0; i < key.length; i++) hash = ((hash * 33) ^ key.charCodeAt(i)) >>> 0
   return `i${hash.toString(36)}`
+}
+
+// A doc held in memory after a failed read joins the file's. A held item whose number the file already uses
+// gets a new one, in a turn after both docs, so no number repeats.
+export function mergeDocs(file: Doc, held: Doc): Doc {
+  const ids = new Set(file.items.map(item => item.id))
+  const taken = new Set(file.items.map(item => item.ref))
+  const extra = held.items.filter(item => !ids.has(item.id))
+  let turn = Math.max(file.turn, held.turn)
+  const renumber = turn + 1
+  let n = 0
+  const added = extra.map(item => {
+    if (!taken.has(item.ref)) return item
+    turn = renumber
+    return { ...item, ref: `${renumber}-${++n}` }
+  })
+  const pick = (key: 'tldr' | 'goal' | 'next' | 'blockers') => held[key] || file[key]
+  return { ...file, turn, tldr: pick('tldr'), goal: pick('goal'), next: pick('next'), blockers: pick('blockers'), items: [...file.items, ...added] }
 }

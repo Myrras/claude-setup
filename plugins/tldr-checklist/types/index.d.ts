@@ -17,8 +17,8 @@ declare module 'claude-code' {
       prompt: string
       interactive: boolean
       unreadable: string
-      // The checklist state last sent with a prompt, and for which session.
-      sent: { sessionId: string; text: string }
+      // The checklist state last sent with a prompt, for which session, and the prompts since.
+      sent: { sessionId: string; text: string; count: number }
     }
   }
 }

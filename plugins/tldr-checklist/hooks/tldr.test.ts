@@ -1,8 +1,8 @@
-import type { On } from 'claude-code'
+import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, FORMAT, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, emptyDoc, FORMAT, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -346,6 +346,26 @@ describe('closing by number', () => {
     expect(done(applyReply(start(), parseReply('✔ You 1-1-2')))).toEqual([])
   })
 
+  test('numbers may be separated by spaces, and or &, start with # and use an en dash', () => {
+    expect(done(applyReply(start(), parseReply('✔ You 1-1 1-3')))).toEqual(['1-1', '1-3'])
+    expect(done(applyReply(start(), parseReply('✔ You 1-1 and 1-3')))).toEqual(['1-1', '1-3'])
+    expect(done(applyReply(start(), parseReply('✔ You 1-1 & 1-3')))).toEqual(['1-1', '1-3'])
+    expect(done(applyReply(start(), parseReply('✔ You #1-2')))).toEqual(['1-2'])
+    expect(done(applyReply(start(), parseReply('✔ You 1–3')))).toEqual(['1-3'])
+    expect(done(applyReply(start(), parseReply('✔ You #1–1, #1–2')))).toEqual(['1-1', '1-2'])
+  })
+
+  test('numbers that match no item fall back to the text', () => {
+    const doc = applyReply(emptyDoc('s1'), parseReply('→ You 10-15 min downtime window\n→ You Other'))
+    expect(doc.items[0]!.text).toBe('10-15 min downtime window')
+    expect(done(applyReply(doc, parseReply('✔ You 10-15 min downtime window')))).toEqual(['1-1'])
+    expect(done(applyReply(doc, parseReply('✔ You 10-15 min downtime')))).toEqual(['1-1'])
+  })
+
+  test('numbers that match an item tick by number only', () => {
+    expect(done(applyReply(start(), parseReply('✔ You 1-2 9-9')))).toEqual(['1-2'])
+  })
+
   test('a line without a leading number still matches by text', () => {
     expect(done(applyReply(start(), parseReply('✔ You Run the migration')))).toEqual(['1-1'])
   })
@@ -399,7 +419,7 @@ describe('open cap', () => {
     expect(openLines(text)[0]).toBe('- 1-2 Early 2')
     expect(openLines(text).at(-2)).toBe('- 1-10 Early 10')
     expect(openLines(text).at(-1)).toBe('- 2-1 Late 1')
-    expect(text).toContain('1 older open item not shown; ask the user to tick off what is done.')
+    expect(text).toContain('1 older open item not shown; ask the user to tick off what is done, or close one with ✔ You <item text>.')
     expect(doc.items).toHaveLength(11)
   })
 
@@ -410,7 +430,55 @@ describe('open cap', () => {
   })
 })
 
+describe('re-listed with a number', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You Review the PR'))
+
+  test('an open item listed again with its number is not added again', () => {
+    for (const line of ['1-2 Review the PR', '#1-2 Review the PR', '1–2 Review the PR']) {
+      const doc = applyReply(start(), parseReply(`→ You ${line}`))
+      expect(doc.items.map(i => i.ref + ' ' + i.text)).toEqual(['1-1 Run the migration', '1-2 Review the PR'])
+    }
+  })
+
+  test('a ticked item listed again with its number comes back open, without the number in its text', () => {
+    const doc = applyReply(applyReply(start(), parseReply('✔ You 1-2')), parseReply('→ You 1-2 Review the PR'))
+    expect(doc.items.map(i => i.ref + ' ' + i.text + ' ' + i.done)).toEqual(['1-1 Run the migration false', '3-1 Review the PR false'])
+  })
+})
+
+describe('mergeDocs', () => {
+  const item = (text: string, ref: string) => ({ id: text, text, done: false, firstSeenTurn: Number(ref[0]), ref })
+  const file = { ...emptyDoc('s1'), turn: 2, items: [item('A', '1-1'), item('B', '2-1')] }
+
+  test('renumbers held items that collide, after both turns', () => {
+    const held = { ...emptyDoc('s1'), turn: 3, items: [item('C', '1-1'), item('D', '3-1'), item('E', '2-1')] }
+    const merged = mergeDocs(file, held)
+    expect(merged.items.map(i => `${i.ref} ${i.text}`)).toEqual(['1-1 A', '2-1 B', '4-1 C', '3-1 D', '4-2 E'])
+    expect(merged.turn).toBe(4)
+  })
+
+  test('keeps numbers and turn when nothing collides, and drops items the file has', () => {
+    const held = { ...emptyDoc('s1'), turn: 1, items: [item('A', '1-1'), item('C', '2-2')] }
+    const merged = mergeDocs(file, held)
+    expect(merged.items.map(i => `${i.ref} ${i.text}`)).toEqual(['1-1 A', '2-1 B', '2-2 C'])
+    expect(merged.turn).toBe(2)
+  })
+})
+
 describe('parseDoc', () => {
+  test('turn covers the highest item number', () => {
+    const items = [{ id: 'a', text: 'A', done: false, firstSeenTurn: 5, ref: '5-1' }]
+    expect(parseDoc(JSON.stringify({ turn: 2, items }), 's1')!.turn).toBe(5)
+    expect(parseDoc(JSON.stringify({ turn: 7, items }), 's1')!.turn).toBe(7)
+  })
+
+  test('a ref that is no number is derived again', () => {
+    const base = { text: 'A', done: false, firstSeenTurn: 2 }
+    const items = [{ ...base, id: 'a', ref: 'x' }, { ...base, id: 'b', ref: 5 }, { ...base, id: 'c', ref: '2-1' }, { ...base, id: 'd', ref: '2-1-3' }]
+    expect(parseDoc(JSON.stringify({ turn: 2, items }), 's1')!.items.map(i => i.ref)).toEqual(['2-2', '2-3', '2-1', '2-4'])
+  })
+
+
   test('answers nothing for text that is no JSON object', () => {
     expect(parseDoc('{"turn": 2', 's1')).toBeUndefined()
     expect(parseDoc('', 's1')).toBeUndefined()
@@ -467,6 +535,7 @@ describe('parseStatus', () => {
 
 function world(on: On, status: string | undefined, startUnreadable = false, broken: 'exists' | 'register' | '' = '') {
   let unreadable = startUnreadable
+  let dropping = false
   const files = new Map<string, string>()
   let id = 's1'
   mock.env(on, { HOME: '/home/me' })
@@ -500,7 +569,8 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
-  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
+  on('prompt.submit', (_, e) => (dropping ? { drop: 'no' } : { text: e.text, context: e.context }))
+  on('session.compact', (_, e) => ({ messages: e.messages }))
   const saved = () => JSON.parse(files.get(FILE) ?? 'null') as Doc | null
   const setId = (next: string) => {
     id = next
@@ -508,7 +578,10 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   const setUnreadable = (value: boolean) => {
     unreadable = value
   }
-  return { files, clock, saved, setId, setUnreadable }
+  const setDropping = (value: boolean) => {
+    dropping = value
+  }
+  return { files, clock, saved, setId, setUnreadable, setDropping }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -690,6 +763,7 @@ test('an empty reply skips the status call', async ($, on) => {
 })
 
 const CONTEXT = { blocks: [{ name: 'currentDate', text: 'Today' }] }
+const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'hi', toolUses: [] }]
 const PROMPT = { text: 'next step?', wait: false, origin: { kind: 'composer' } } as const
 const formatBlock = (result: { blocks: readonly { name: string; text: string }[] }) => result.blocks.find(b => b.name === 'replyFormat')
 
@@ -795,8 +869,10 @@ test('the checklist state is sent only when it changed, and again after the cont
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
   expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
 
-  // A new conversation or a compaction reads the context again.
+  // Reading the context (also done for every subagent) does not reset it; a compaction does.
   await $.prompt.context(CONTEXT)
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
   expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
 
@@ -818,4 +894,36 @@ test('the checklist state is sent only when it changed, and again after the cont
   await $.session.end(END('s1', 'resume'))
   await clock.settle()
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+})
+
+test('a precompute or a subagent compaction does not reset the sent state', async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  await $.session.compact({ trigger: 'auto', agentId: 'a1', messages: MESSAGES })
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+})
+
+test('a dropped prompt does not count as sent', async ($, on) => {
+  const { clock, setDropping } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  setDropping(true)
+  expect((await $.prompt.submit(PROMPT)).drop).toBe('no')
+  setDropping(false)
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+})
+
+test('the state is sent again at least every 5th prompt', async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  const sent: boolean[] = []
+  for (let i = 0; i < 11; i++) sent.push((await $.prompt.submit(PROMPT)).context !== undefined)
+  expect(sent).toEqual([true, false, false, false, false, true, false, false, false, false, true])
 })

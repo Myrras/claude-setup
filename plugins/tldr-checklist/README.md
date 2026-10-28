@@ -10,7 +10,7 @@ Each item gets a number `<reply>-<n>`: the reply that added it and its place amo
 
 ## Reply format
 
-The mod tells Claude to answer in this format, once per conversation (sent again after a compaction):
+The mod tells Claude to answer in this format, once per conversation (sent again after a compaction, where Claude Code builds the context anew):
 
 ```
 TL;DR  one line: the outcome
@@ -26,7 +26,7 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 - The first `TL;DR` line is the TL;DR. If a reply has none, the previous one stays.
 - Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine.
-- A `✔ You <number>` line ticks the open item with that number (`✔ You 2-3`, `✔ You 2-3 Run the migration`, `✔ You 2-1, 2-3`). A number that matches no open item ticks nothing, and the text after it is not matched.
+- A `✔ You <number>` line ticks the open item with that number (`✔ You 2-3`, `✔ You 2-3 Run the migration`, `✔ You 2-1, 2-3`). Numbers may be separated by commas, spaces, `and` or `&`, may start with `#` and may use an en dash (`#2–3`). A number that matches no open item ticks nothing, and the text after it is not matched; numbers that match no item at all are read as text. A `→ You` line that starts with the number of an existing item is that item, not a new one.
 - A `✔ You <item>` line without a leading number ticks the open item with that text. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins.
 - `✓`, `✅` and `☑` work like `✔`. `✔ Done` and `✔ Checked` (with any of them) never tick anything.
 - Lines inside code fences are skipped.
@@ -36,9 +36,9 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 With a prompt you send, Claude also gets the checklist as it stands, with item numbers: the open items, the ones you ticked and the ones its last reply closed. A tick of yours means you read the item, not that it is done: Claude may still mention it if it needs doing, but does not list it again unless it changed. It is told not to repeat items unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <number>`. With an empty checklist nothing is sent.
 
-At most the 10 newest open items are sent; with more, Claude is told how many older ones were left out and to ask you to tick off what is done. The pane keeps them all.
+At most the 10 newest open items are sent; with more, Claude is told how many older ones were left out and to ask you to tick off what is done or close one by its text. The pane keeps them all.
 
-The state is sent only when it changed since the last one sent (a new item, a tick by you or a reply). It is sent again at the start of a conversation, after a compaction and after `/clear` or `/resume`. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
+The state is sent only when it changed since the last one sent (a new item, a tick by you or a reply). It is sent again after a compaction and after `/clear` or `/resume`, and at least every 5th prompt even when unchanged (Claude Code has no rewind event, and a rewind can drop the message that held it). A prompt that is dropped does not count as sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
 
 The reply format is added to every conversation, subagents too, as the API offers no way to limit it to the main one. It says to follow another format as a subagent or when one is asked.
 
