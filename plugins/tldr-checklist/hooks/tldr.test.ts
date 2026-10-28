@@ -449,6 +449,27 @@ describe('re-listed with a number', () => {
   })
 })
 
+describe('re-listed with an old number', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Merge the PR\n→ You Review the PR'))
+
+  test('a number withdrawn in the same reply is dropped from the text', () => {
+    const doc = applyReply(start(), parseReply('✖ You 1-1\n→ You 1-1 Merge the PR'))
+    expect(doc.items.map(i => i.ref + ' ' + i.text)).toEqual(['1-2 Review the PR', '2-1 Merge the PR'])
+  })
+
+  test('a number removed with the tool earlier is dropped from the text', () => {
+    const removed = applyTool(start(), { action: 'remove', ref: '1-1' })
+    if (!('doc' in removed)) throw new Error(removed.error)
+    const doc = applyReply(removed.doc, parseReply('→ You 1-1 Merge the PR'))
+    expect(doc.items.map(i => i.ref + ' ' + i.text)).toEqual(['1-2 Review the PR', '2-1 Merge the PR'])
+  })
+
+  test('a number that was never handed out stays in the text', () => {
+    const doc = applyReply(start(), parseReply('→ You 10-15 min downtime window'))
+    expect(doc.items.map(i => i.text)).toEqual(['Merge the PR', 'Review the PR', '10-15 min downtime window'])
+  })
+})
+
 describe('checklist tool', () => {
   const refs = (doc: Doc) => doc.items.map(i => [i.ref, i.text, i.done])
   const run = (doc: Doc, input: Parameters<typeof applyTool>[1]) => {
@@ -457,6 +478,14 @@ describe('checklist tool', () => {
     return result.doc
   }
   const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Merge the PR\n→ You Review the docs'))
+
+  test('ref accepts several numbers in one string', () => {
+    const base = start()
+    for (const ref of ['1-1, 1-2', '1-1 and 1-2', '#1-1 & #1-2', '1–1 1–2', ['#1-1', '1-2']]) {
+      expect(run(base, { action: 'close', ref }).items.map(i => i.done)).toEqual([true, true])
+    }
+    expect(applyTool(base, { action: 'remove', ref: 'soon' })).toEqual({ error: 'Unknown item number: soon. Nothing changed.' })
+  })
 
   test('list answers ref, state and text, open items first', () => {
     let doc = run(start(), { action: 'close', ref: '1-1' })
@@ -579,6 +608,14 @@ describe('mergeDocs', () => {
     expect(merged.turn).toBe(4)
   })
 
+  test('keeps the later last number, never reusing it', () => {
+    const held = { ...emptyDoc('s1'), turn: 4, lastRef: '5-1', items: [] }
+    const merged = mergeDocs({ ...file, lastRef: '2-1' }, held)
+    expect(merged.lastRef).toBe('5-1')
+    expect(applyTool(merged, { action: 'add', text: 'New' })).toMatchObject({ doc: { items: [{}, {}, { ref: '5-2' }] } })
+    expect(mergeDocs({ ...file, lastRef: '6-2' }, held).lastRef).toBe('6-2')
+  })
+
   test('keeps numbers and turn when nothing collides, and drops items the file has', () => {
     const held = { ...emptyDoc('s1'), turn: 1, items: [item('A', '1-1'), item('C', '2-2')] }
     const merged = mergeDocs(file, held)
@@ -673,7 +710,9 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
     if (unreadable) throw new Error('EACCES')
     return { value: files.get(e.path) ?? '' }
   })
+  let writes = 0
   on('fs.write', (_, e) => {
+    writes++
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -708,7 +747,7 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   const setDropping = (value: boolean) => {
     dropping = value
   }
-  return { files, clock, saved, setId, setUnreadable, setDropping, tools }
+  return { files, clock, saved, setId, setUnreadable, setDropping, tools, writes: () => writes }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -1095,6 +1134,20 @@ test('the checklist tool names unknown numbers and changes nothing', async ($, o
   expect(saved()?.items.map(i => i.done)).toEqual([false])
 })
 
+test('an unknown number or a repeated add writes nothing', async ($, on) => {
+  const { clock, writes } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('→ You Merge the PR', 't1'))
+  await clock.settle()
+  const before = writes()
+  await $.tool.call({ tool: TOOL, action: 'close', ref: '7-7' })
+  await $.tool.call({ tool: TOOL, action: 'add', text: 'merge the pr' })
+  await $.tool.call({ tool: TOOL, action: 'list' })
+  expect(writes()).toBe(before)
+  await $.tool.call({ tool: TOOL, action: 'close', ref: '1-1' })
+  expect(writes()).toBe(before + 1)
+})
+
 test('subagents cannot use the checklist tool', async ($, on) => {
   const { clock, saved } = world(on, undefined)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1122,13 +1175,13 @@ test('a change through the tool is sent with the next prompt', async ($, on) => 
   expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
 })
 
-test('with inject off, the checklist tool is not registered', { options: { inject: false } }, async ($, on) => {
-  const { tools } = world(on, undefined)
-  // Nothing in the plugin answers the call: it reaches what stands beneath.
-  on('tool.call', { tool: TOOL }, () => ({ deny: 'no such tool' }))
+test('with inject off, the checklist tool is not registered and a call is refused', { options: { inject: false } }, async ($, on) => {
+  const { tools, writes } = world(on, undefined)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(tools).toEqual([])
-  expect(await $.tool.call({ tool: TOOL, action: 'list' })).toEqual({ deny: 'no such tool' })
+  const before = writes()
+  expect(await $.tool.call({ tool: TOOL, action: 'add', text: 'Deploy' })).toEqual({ deny: 'The checklist tool is off (inject setting).' })
+  expect(writes()).toBe(before)
 })
 
 test('a ✖ You line in the reply removes the item', async ($, on) => {

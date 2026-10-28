@@ -133,13 +133,36 @@ function refsIn(text: string): string[] {
 
 // Oldest first: by the reply that added the item, then its place in that reply.
 function byRef(a: Item, b: Item): number {
-  const [at = 0, an = 0] = a.ref.split('-').map(Number)
-  const [bt = 0, bn = 0] = b.ref.split('-').map(Number)
-  return at - bt || an - bn
+  return compareRefs(a.ref, b.ref)
 }
 
 export function emptyDoc(sessionId: string): Doc {
   return { sessionId, turn: 0, tldr: '', goal: '', next: '', blockers: '', items: [] }
+}
+
+// An item number is the reply's turn and the item's place among the ones that turn added; never reused.
+// Texts already in `seen` are skipped. Gives the new items and the last number handed out, if any.
+function addTexts(doc: Doc, texts: string[], seen: Set<string>, turn: number): { added: Item[]; lastRef?: string } {
+  const first = nextN(doc, turn)
+  const added: Item[] = []
+  for (const text of texts) {
+    const key = normalize(text)
+    if (seen.has(key)) continue
+    seen.add(key)
+    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${first + added.length}` })
+  }
+  return added.length ? { added, lastRef: added[added.length - 1]!.ref } : { added }
+}
+
+// Whether ref is not after `last`: by turn, then place.
+function atMost(ref: string, last: string | undefined): boolean {
+  return last !== undefined && compareRefs(ref, last) <= 0
+}
+
+function compareRefs(a: string, b: string): number {
+  const [at = 0, an = 0] = a.split('-').map(Number)
+  const [bt = 0, bn = 0] = b.split('-').map(Number)
+  return at - bt || an - bn
 }
 
 export function applyReply(doc: Doc, reply: Reply): Doc {
@@ -153,26 +176,24 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
   const kept = remaining.filter(item => !item.done || item.closedTurn === turn)
   const seen = new Set(kept.map(item => normalize(item.text)))
   const byRefs = new Map(remaining.map(item => [item.ref, item]))
-  // An item number is the reply's turn and the item's place among the ones that turn added; never reused.
-  const first = nextN(doc, turn)
-  const added: Item[] = []
+  const everRef = new Set(doc.items.map(item => item.ref))
+  const texts: string[] = []
   for (const line of reply.you) {
-    // A line that starts with the number of an existing item is that item, listed again.
+    // A line that starts with the number of an existing item is that item, listed again; a number
+    // of a removed, ticked or past item is dropped from the text too. Other numbers stay in it.
     const lead = LEAD_REF.exec(line)
-    const known = lead ? byRefs.get(`${lead[1]}-${lead[2]}`) : undefined
+    const ref = lead ? `${lead[1]}-${lead[2]}` : ''
+    const known = lead ? byRefs.get(ref) : undefined
     if (known && !known.done) continue
-    const text = lead && known ? line.slice(lead[0].length) : line
-    const key = normalize(text)
-    if (seen.has(key)) continue
-    seen.add(key)
-    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${first + added.length}` })
+    texts.push(lead && (known || everRef.has(ref) || atMost(ref, doc.lastRef)) ? line.slice(lead[0].length) : line)
   }
+  const { added, lastRef: last } = addTexts(doc, texts, seen, turn)
   const open = [...kept, ...added]
   const every = [...new Map([...remaining, ...open].map(item => [item.id, item])).values()]
   const keys = every.map(item => closeKey(item.text))
   const known = { all: new Set(keys), every: keys, refs: new Set(every.map(item => item.ref)) }
   const items = open.map(item => (closes(reply.closed, item, known) ? { ...item, done: true, tickedBy: 'reply' as const } : item))
-  const lastRef = added.length ? `${turn}-${first + added.length - 1}` : doc.lastRef
+  const lastRef = last ?? doc.lastRef
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items, ...(lastRef ? { lastRef } : {}) }
 }
 
@@ -187,23 +208,18 @@ export function applyTool(doc: Doc, input: ToolInput): { doc: Doc } | { error: s
   if (input.action === 'add') {
     const texts = strings(input.text).map(tidy).filter(Boolean)
     if (!texts.length) return { error: 'add needs text.' }
-    const open = new Set(doc.items.filter(item => !item.done).map(item => normalize(item.text)))
-    const first = nextN(doc, turn)
-    const added: Item[] = []
-    for (const text of texts) {
-      const key = normalize(text)
-      if (open.has(key)) continue
-      open.add(key)
-      added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${first + added.length}` })
-    }
+    const { added, lastRef } = addTexts(doc, texts, new Set(doc.items.filter(item => !item.done).map(item => normalize(item.text))), turn)
     if (!added.length) return { doc }
     // A done item with the same text makes way, so ids stay unique.
     const ids = new Set(added.map(item => item.id))
     const items = [...doc.items.filter(item => !ids.has(item.id)), ...added]
-    return { doc: { ...doc, items, lastRef: `${turn}-${first + added.length - 1}` } }
+    return { doc: { ...doc, items, lastRef } }
   }
   if (input.action !== 'close' && input.action !== 'remove') return { error: 'action must be list, add, close or remove.' }
-  const wanted = strings(input.ref).map(ref => tidy(ref).replace(/^#/, '').replace('–', '-'))
+  const wanted = strings(input.ref).flatMap(ref => {
+    const found = refsIn(ref)
+    return found.length ? found : [tidy(ref)]
+  })
   if (!wanted.length) return { error: `${input.action} needs ref.` }
   const known = new Set(doc.items.map(item => item.ref))
   const unknown = wanted.filter(ref => !known.has(ref))
@@ -402,6 +418,8 @@ export function mergeDocs(file: Doc, held: Doc): Doc {
     turn = renumber
     return { ...item, ref: `${renumber}-${++n}` }
   })
+  // The later last number of the two, or a renumbered item's, so none is handed out twice.
+  const lastRef = [file.lastRef, held.lastRef, n ? `${renumber}-${n}` : undefined].filter((ref): ref is string => ref !== undefined).sort(compareRefs).pop()
   const pick = (key: 'tldr' | 'goal' | 'next' | 'blockers') => held[key] || file[key]
-  return { ...file, turn, tldr: pick('tldr'), goal: pick('goal'), next: pick('next'), blockers: pick('blockers'), items: [...file.items, ...added] }
+  return { ...file, turn, tldr: pick('tldr'), goal: pick('goal'), next: pick('next'), blockers: pick('blockers'), items: [...file.items, ...added], ...(lastRef ? { lastRef } : {}) }
 }

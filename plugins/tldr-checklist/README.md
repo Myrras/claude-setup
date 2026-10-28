@@ -35,11 +35,11 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 ## Checklist tool
 
-Claude also keeps the checklist during a turn, not only through the reply text, with the `checklist` tool (`mcp__tldr-checklist__checklist`). Each call saves the checklist, so the pane updates right away, and answers the list.
+Claude also keeps the checklist during a turn, not only through the reply text, with the `checklist` tool (`mcp__tldr-checklist__checklist`). Each change is saved, so the pane updates right away, and every call answers the list. `list` saves nothing. An error (an unknown number, a missing `text` or `ref`) is denied and changes nothing. Saves are skipped while the state file is unreadable, as with every other write.
 
 - `list`: the items, open first, each with its number, state (`open`, `done`, or `read`: ticked by you) and text.
 - `add`: `text`, one or a list. Adds open items like `→ You` lines, with the same repeat check. They are numbered in the reply in progress; `→ You` lines of that reply are numbered after them.
-- `close`: `ref`, one or a list. Ticks the items as done, as `✔ You <number>` does. They stay in the pane until the reply after this one.
+- `close`: `ref`, one or a list; one string may hold several numbers (`2-1, 2-3`, `2-1 and 2-3`). Ticks the items as done, as `✔ You <number>` does. They stay in the pane until the reply after this one.
 - `remove`: `ref`, one or a list. Deletes items that no longer apply, for example "Merge the PR" when you ask for another fix first. They leave the pane right away; added again later, an item gets a new number.
 
 Close means done; remove means withdrawn, not done. An unknown number changes nothing and the call says which. The tool is for the main conversation only: calls from subagents are refused. The reply format and the checklist state tell Claude to remove items your prompt makes premature or moot, and to add them again once they apply.
@@ -56,7 +56,7 @@ The reply format is added to every conversation, subagents too, as the API offer
 
 ## Setting
 
-`inject` (on by default) sends both the reply format and the checklist state, and registers the checklist tool. Turn it off if you bring your own reply format: the pane then only reads the replies, and there is no checklist tool. Turning it off mid-conversation stops the checklist state right away; the reply format already sent stays until the next conversation or compaction. Change it in `/config`, or in settings:
+`inject` (on by default) sends both the reply format and the checklist state, and registers the checklist tool. Turn it off if you bring your own reply format: the pane then only reads the replies, and there is no checklist tool. A change to `inject` updates the tool list at the next session start; until then a call to the tool is refused. Turning it off mid-conversation stops the checklist state right away; the reply format already sent stays until the next conversation or compaction. Change it in `/config`, or in settings:
 
 ```json
 { "pluginConfigs": { "tldr-checklist": { "options": { "inject": false } } } }

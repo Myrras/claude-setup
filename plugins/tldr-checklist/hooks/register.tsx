@@ -167,28 +167,33 @@ export const register: Register = (on, options) => {
       }
       return result
     })
-
-    // The checklist during a turn, not only through the reply. The main conversation's alone.
-    on('tool.call', { tool: TOOL }, async ($, e) => {
-      if (e.agentId !== undefined) return { deny: 'The checklist belongs to the main conversation; a subagent cannot use it.' }
-      try {
-        const input = e as ToolInput
-        const held = await current($)
-        if (input.action === 'list') return { result: listText(held) }
-        // The update may run again on a newer value; its last run decides.
-        const outcome = { error: '' }
-        const updated = await change($, value => {
-          const result = applyTool(value, input)
-          outcome.error = 'error' in result ? result.error : ''
-          return 'doc' in result ? result.doc : value
-        })
-        return outcome.error ? { deny: outcome.error } : { result: listText(updated) }
-      } catch (error) {
-        $.ui.log(`tldr-checklist: could not run the checklist tool (${String(error)})`)
-        return { deny: `The checklist could not be read or saved (${String(error)}).` }
-      }
-    })
   }
+
+  // The checklist during a turn, not only through the reply. The main conversation's alone.
+  // Registered always: the tool list only changes at the next session start, so a call after `inject` went off is refused.
+  on('tool.call', { tool: TOOL }, async ($, e) => {
+    if (options.inject === false) return { deny: 'The checklist tool is off (inject setting).' }
+    if (e.agentId !== undefined) return { deny: 'The checklist belongs to the main conversation; a subagent cannot use it.' }
+    try {
+      const input = e as ToolInput
+      const held = await current($)
+      if (input.action === 'list') return { result: listText(held) }
+      // The update may run again on a newer value; its last run decides.
+      const outcome = { error: '', changed: false }
+      const updated = await update($, doc, value => {
+        const result = applyTool(value, input)
+        outcome.error = 'error' in result ? result.error : ''
+        outcome.changed = 'doc' in result && result.doc !== value
+        return 'doc' in result ? result.doc : value
+      })
+      if (outcome.error) return { deny: outcome.error }
+      if (outcome.changed) await save($, updated)
+      return { result: listText(updated) }
+    } catch (error) {
+      $.ui.log(`tldr-checklist: could not run the checklist tool (${String(error)})`)
+      return { deny: `The checklist could not be read or saved (${String(error)}).` }
+    }
+  })
 
   on('session.start', async ($, e, next) => {
     const step = (what: string, fn: () => unknown) =>
