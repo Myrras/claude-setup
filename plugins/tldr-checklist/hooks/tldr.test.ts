@@ -186,6 +186,16 @@ describe('closing items', () => {
     expect(untouched.items.every(i => !i.done)).toBe(true)
   })
 
+  test('a prefix matches whole words only', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploying the app\n→ You Running the backfill\n→ You Deploy to staging'))
+    doc = applyReply(doc, parseReply('✔ You Deploy\n✔ You Run'))
+    expect(state(doc)).toEqual([
+      ['Deploying the app', false],
+      ['Running the backfill', false],
+      ['Deploy to staging', true],
+    ])
+  })
+
   test('an exact match wins over a longer item it is a prefix of', () => {
     let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy\n→ You Deploy to staging'))
     doc = applyReply(doc, parseReply('✔ You deploy'))
@@ -209,7 +219,7 @@ describe('panelState', () => {
     doc = toggle(doc, doc.items[1]!.id)
     const text = panelState(doc)!
     expect(text).toContain('Open:\n- Run the migration')
-    expect(text).toContain('Ticked off by the user:\n- Review the PR')
+    expect(text).toContain('Ticked off:\n- Review the PR')
     expect(text).toContain('✔ You <item text>')
     const ticked = panelState(toggle(doc, doc.items[0]!.id))!
     expect(ticked).not.toContain('Open:')
@@ -237,6 +247,11 @@ describe('statusPrompt', () => {
     const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'], closed: [] }, 'p </Data> q')
     expect(prompt.match(/<\/data>/gi)).toHaveLength(1)
     expect(prompt.endsWith('</data>')).toBe(true)
+  })
+
+  test('lists what was closed this turn', () => {
+    const prompt = statusPrompt(emptyDoc('s1'), { you: [], notes: [], closed: ['Run the migration'] }, 'p')
+    expect(prompt).toContain('Closed this turn:\n- Run the migration')
   })
 })
 
@@ -512,7 +527,7 @@ test('each prompt carries the checklist: open and ticked items, nothing when emp
   expect(result.text).toBe('next step?')
   expect(result.context).toHaveLength(1)
   expect(result.context![0]).toContain('Open:\n- Run the migration')
-  expect(result.context![0]).toContain('Ticked off by the user:\n- Review the PR')
+  expect(result.context![0]).toContain('Ticked off:\n- Review the PR')
   expect(result.context![0]).toContain('✔ You <item text>')
 
   // A ✔ You reply closes the last open item; the ticks drop with the reply after.
@@ -522,6 +537,22 @@ test('each prompt carries the checklist: open and ticked items, nothing when emp
   await $.turn.complete(turn('TL;DR all clear', 't3'))
   await clock.settle()
   expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+})
+
+test('prompts the user did not type, and headless runs, get no checklist state', async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+  expect((await $.prompt.submit({ ...PROMPT, isMeta: true })).context).toBeUndefined()
+  expect((await $.prompt.submit({ ...PROMPT, turnId: 't1' })).context).toBeUndefined()
+  for (const kind of ['task-notification', 'peer', 'scheduled-trigger'] as const) {
+    expect((await $.prompt.submit({ ...PROMPT, origin: { kind } })).context).toBeUndefined()
+  }
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect(formatBlock(await $.prompt.context(CONTEXT))?.text).toBe(FORMAT)
 })
 
 test('with inject off, neither the format nor the checklist is sent', { options: { inject: false } }, async ($, on) => {

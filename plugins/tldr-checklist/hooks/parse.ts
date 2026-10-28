@@ -70,7 +70,8 @@ TL;DR  one line: the outcome
 - Start with the TL;DR line. A trivial answer is just that line.
 - Use → You only for what the user must do or decide, not what you can do yourself. One line each.
 - Optional: ✔ Done, ✔ Checked, ! Note; leave out empty ones.
-- One line per item. No filler, no recap.`
+- One line per item. No filler, no recap.
+For replies to the user only; as a subagent, or when a specific output format is asked, follow that instead.`
 
 // The checklist as the user sees it, sent with each prompt; nothing when it is empty.
 export function panelState(doc: Doc): string | undefined {
@@ -80,7 +81,7 @@ export function panelState(doc: Doc): string | undefined {
   const list = (items: Item[]) => items.map(item => `- ${item.text}`).join('\n')
   const parts = ['The → You checklist in the side panel:']
   if (open.length) parts.push(`Open:\n${list(open)}`)
-  if (ticked.length) parts.push(`Ticked off by the user:\n${list(ticked)}`)
+  if (ticked.length) parts.push(`Ticked off:\n${list(ticked)}`)
   const rules = [
     "Don't repeat these as → You lines unless they changed.",
     "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
@@ -110,14 +111,15 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items: [...kept, ...added] }
 }
 
-// `✔ You <text>` closes the open item with that text, or the one open item it is a prefix of.
+// `✔ You <text>` closes the open item with that text, or the one open item whose first words it is.
 function closes(closed: string[], item: Item, items: Item[]): boolean {
   const key = normalize(item.text)
   const open = items.filter(other => !other.done).map(other => normalize(other.text))
   return closed.some(text => {
     const want = normalize(text)
     if (want === key) return true
-    return !open.includes(want) && key.startsWith(want) && open.filter(other => other.startsWith(want)).length === 1
+    const starts = (other: string) => other.startsWith(`${want} `)
+    return !open.includes(want) && starts(key) && open.filter(starts).length === 1
   })
 }
 
@@ -172,6 +174,9 @@ Assistant's TL;DR: ${safe(reply.tldr || doc.tldr) || '(none)'}
 
 For the user to do:
 ${lines(reply.you)}
+
+Closed this turn:
+${lines(reply.closed)}
 
 Notes:
 ${lines(reply.notes)}

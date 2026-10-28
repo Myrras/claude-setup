@@ -122,7 +122,10 @@ export const register: Register = (on, options) => {
 
     // Each prompt carries the checklist as it stands, so replies neither repeat nor miss items.
     on('prompt.submit', async ($, e, next) => {
-      if (e.command) return next(e)
+      // Only what the user typed: not commands, meta or queued deliveries, task notifications, peers, triggers or plugin prompts.
+      // Headless runs never apply `✔ You` lines, so the state would only go stale.
+      const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+      if (e.command || e.isMeta || e.turnId !== undefined || !typed || !(await read($, interactive))) return next(e)
       let state: string | undefined
       try {
         state = panelState(await current($))
