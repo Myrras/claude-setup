@@ -3,5 +3,5 @@
   "description": "Personal Claude Code plugins by RobbieMinderhoud.",
   "owner": { "name": "RobbieMinderhoud" },
   "plugins": [{ "name": "orchestrator-mode", "source": "./plugins/orchestrator-mode", "description": "Main session orchestrates and verifies; subagents make every change." },
-    { "name": "tldr-checklist", "source": "./plugins/tldr-checklist", "description": "Side pane with the latest TL;DR, goal, next step, blockers and a persistent → You checklist" }]
+    { "name": "tldr-checklist", "source": "./plugins/tldr-checklist", "description": "Teaches a TL;DR / → You reply format; side pane with the latest TL;DR, goal, next step, blockers and a persistent → You checklist" }]
 }

@@ -2,11 +2,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, emptyDoc, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
+import { applyReply, emptyDoc, FORMAT, panelState, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
 import type { Reply } from './parse'
 
 const PANE = 'tldr-checklist'
 const TITLE = 'TL;DR'
+const FORMAT_BLOCK = 'replyFormat'
 
 // Change the tag when Doc's fields change: an older value then reads as empty.
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-1' })
@@ -111,7 +112,27 @@ async function refreshStatus(
   await change($, value => (value.sessionId === sessionId && turn === statusTurn ? { ...value, ...status } : value))
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // Off for those who bring their own reply format: nothing is added to what the model reads.
+  if (options.inject !== false) {
+    // Once per conversation, sent again after a compaction.
+    on('prompt.context', ($, e, next) =>
+      next({ ...e, blocks: [...e.blocks.filter(block => block.name !== FORMAT_BLOCK), { name: FORMAT_BLOCK, text: FORMAT }] }),
+    )
+
+    // Each prompt carries the checklist as it stands, so replies neither repeat nor miss items.
+    on('prompt.submit', async ($, e, next) => {
+      if (e.command) return next(e)
+      let state: string | undefined
+      try {
+        state = panelState(await current($))
+      } catch (error) {
+        $.ui.log(`tldr-checklist: could not read the checklist (${String(error)})`)
+      }
+      return next(state ? { ...e, context: [...(e.context ?? []), state] } : e)
+    })
+  }
+
   on('session.start', async ($, e, next) => {
     const step = (what: string, fn: () => unknown) =>
       Promise.resolve()
@@ -165,7 +186,7 @@ export const register: Register = on => {
       const prompt = await read($, lastPrompt)
       const { sessionId } = await current($)
       const updated = await change($, value => applyReply(value, reply))
-      if (!reply.tldr && !reply.you.length && !reply.notes.length) return done
+      if (!reply.tldr && !reply.you.length && !reply.notes.length && !reply.closed.length) return done
       const { turn } = updated
       statusTurn = turn
       // The status call runs after the turn so it never holds up the prompt.

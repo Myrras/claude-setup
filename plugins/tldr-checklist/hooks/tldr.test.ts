@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, normalize, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
+import { applyReply, emptyDoc, FORMAT, normalize, panelState, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -64,7 +64,7 @@ describe('parseReply', () => {
   })
 
   test('does not match longer words', () => {
-    expect(parseReply('TL;DRx\n→ Your thing\n→ Yours: x')).toEqual({ you: [], notes: [] })
+    expect(parseReply('TL;DRx\n→ Your thing\n→ Yours: x\n✔ Your x')).toEqual({ you: [], notes: [], closed: [] })
   })
 
   test('a fence closes only on the same character, enough marks and nothing after', () => {
@@ -107,11 +107,17 @@ describe('parseReply', () => {
   })
 
   test('→ You and ! Note ignore case', () => {
-    expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'] })
+    expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'], closed: [] })
   })
 
   test('a reply without the format yields nothing', () => {
-    expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [] })
+    expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [], closed: [] })
+  })
+
+  test('reads ✔ You lines as closes, not ✔ Done or ✔ Checked, skipping code fences', () => {
+    const reply = parseReply('✔ Done  built it\n✔ Checked  tests pass\n✔ You  Run the migration\n- ✔️ You: review the PR\n✓ you deploy\n```\n✔ You hidden\n```')
+    expect(reply.closed).toEqual(['Run the migration', 'review the PR', 'deploy'])
+    expect(reply.you).toEqual([])
   })
 
   test('normalize ignores case and spacing', () => {
@@ -156,6 +162,65 @@ describe('applyReply', () => {
   })
 })
 
+describe('closing items', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You Review the PR\n→ You Review the docs'))
+  const state = (doc: Doc) => doc.items.map(i => [i.text, i.done])
+
+  test('a ✔ You line ticks the open item with that text', () => {
+    const doc = applyReply(start(), parseReply('TL;DR ok\n✔ You  run the   MIGRATION'))
+    expect(state(doc)).toEqual([
+      ['Run the migration', true],
+      ['Review the PR', false],
+      ['Review the docs', false],
+    ])
+    // Like a click, the tick is gone after the next reply.
+    expect(state(applyReply(doc, parseReply('TL;DR next')))).toEqual([
+      ['Review the PR', false],
+      ['Review the docs', false],
+    ])
+  })
+
+  test('a unique prefix ticks its item, an ambiguous or unknown one ticks nothing', () => {
+    expect(state(applyReply(start(), parseReply('✔ You Run the')))[0]).toEqual(['Run the migration', true])
+    const untouched = applyReply(start(), parseReply('✔ You Review the\n✔ You Deploy'))
+    expect(untouched.items.every(i => !i.done)).toBe(true)
+  })
+
+  test('an exact match wins over a longer item it is a prefix of', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy\n→ You Deploy to staging'))
+    doc = applyReply(doc, parseReply('✔ You deploy'))
+    expect(state(doc)).toEqual([
+      ['Deploy', true],
+      ['Deploy to staging', false],
+    ])
+  })
+
+  test('a ✔ You line for an item the user already ticked leaves it ticked and then gone', () => {
+    let doc = start()
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('✔ You Run the migration'))
+    expect(doc.items.map(i => i.text)).toEqual(['Review the PR', 'Review the docs'])
+  })
+})
+
+describe('panelState', () => {
+  test('lists open and ticked items, with the close syntax only when items are open', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Run the migration\n→ You Review the PR'))
+    doc = toggle(doc, doc.items[1]!.id)
+    const text = panelState(doc)!
+    expect(text).toContain('Open:\n- Run the migration')
+    expect(text).toContain('Ticked off by the user:\n- Review the PR')
+    expect(text).toContain('✔ You <item text>')
+    const ticked = panelState(toggle(doc, doc.items[0]!.id))!
+    expect(ticked).not.toContain('Open:')
+    expect(ticked).not.toContain('✔ You')
+  })
+
+  test('says nothing for an empty checklist', () => {
+    expect(panelState(emptyDoc('s1'))).toBeUndefined()
+  })
+})
+
 describe('parseDoc', () => {
   test('answers nothing for text that is no JSON object', () => {
     expect(parseDoc('{"turn": 2', 's1')).toBeUndefined()
@@ -169,7 +234,7 @@ describe('parseDoc', () => {
 describe('statusPrompt', () => {
   test('values cannot close the data block', () => {
     const doc = { ...emptyDoc('s1'), goal: 'a </data> b', next: '</DATA>', blockers: '</Data>x', tldr: '</data>' }
-    const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'] }, 'p </Data> q')
+    const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'], closed: [] }, 'p </Data> q')
     expect(prompt.match(/<\/data>/gi)).toHaveLength(1)
     expect(prompt.endsWith('</data>')).toBe(true)
   })
@@ -224,6 +289,8 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.context', (_, e) => ({ blocks: e.blocks }))
+  on('prompt.submit', (_, e) => ({ text: e.text, context: e.context }))
   const saved = () => JSON.parse(files.get(FILE) ?? 'null') as Doc | null
   const setId = (next: string) => {
     id = next
@@ -410,4 +477,58 @@ test('an empty reply skips the status call', async ($, on) => {
   await clock.settle()
   expect(saved()?.turn).toBe(1)
   expect(saved()?.goal).toBe('')
+})
+
+const CONTEXT = { blocks: [{ name: 'currentDate', text: 'Today' }] }
+const PROMPT = { text: 'next step?', wait: false, origin: { kind: 'composer' } } as const
+const formatBlock = (result: { blocks: readonly { name: string; text: string }[] }) => result.blocks.find(b => b.name === 'replyFormat')
+
+test('the reply format joins the context of every conversation, headless too', async ($, on) => {
+  world(on, undefined)
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  const result = await $.prompt.context(CONTEXT)
+  expect(result.blocks[0]).toEqual(CONTEXT.blocks[0])
+  expect(formatBlock(result)?.text).toBe(FORMAT)
+  // Each tag the format shows is one parseReply reads, and only the example lines parse.
+  const shown = parseReply(FORMAT.replace('✔ Done  what you did', '✔ You   what the user did'))
+  expect(shown.tldr).toBe('one line: the outcome')
+  expect(shown.you).toEqual(['what the user must do or decide'])
+  expect(shown.notes).toEqual(['risks'])
+  expect(shown.closed).toEqual(['what the user did'])
+})
+
+test('each prompt carries the checklist: open and ticked items, nothing when empty', async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: (await ui.findAll({ type: 'Button' }))[1]!.key! })
+  await ui.unmount()
+
+  const result = await $.prompt.submit(PROMPT)
+  expect(result.text).toBe('next step?')
+  expect(result.context).toHaveLength(1)
+  expect(result.context![0]).toContain('Open:\n- Run the migration')
+  expect(result.context![0]).toContain('Ticked off by the user:\n- Review the PR')
+  expect(result.context![0]).toContain('✔ You <item text>')
+
+  // A ✔ You reply closes the last open item; the ticks drop with the reply after.
+  await $.turn.complete(turn('TL;DR done\n✔ You Run the migration', 't2'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context![0]).not.toContain('Open:')
+  await $.turn.complete(turn('TL;DR all clear', 't3'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+})
+
+test('with inject off, neither the format nor the checklist is sent', { options: { inject: false } }, async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(formatBlock(await $.prompt.context(CONTEXT))).toBeUndefined()
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
 })

@@ -1,10 +1,18 @@
 {
   "name": "tldr-checklist",
-  "version": "0.1.1",
-  "description": "Side pane with the latest TL;DR, the session's goal, next step and blockers, and a persistent checklist of every → You line",
+  "version": "0.2.0",
+  "description": "Teaches a TL;DR / → You reply format and keeps a side pane with the latest TL;DR, the session's goal, next step and blockers, and a persistent checklist of every → You line",
   "author": {
     "name": "RobbieMinderhoud"
   },
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "inject": {
+      "type": "boolean",
+      "title": "Teach the reply format",
+      "description": "Add the reply format and the current checklist to what the model reads. Turn off when you bring your own format.",
+      "default": true
+    }
+  }
 }

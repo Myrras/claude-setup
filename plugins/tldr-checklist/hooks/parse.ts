@@ -1,6 +1,6 @@
 import type { Doc, Item, Status } from '../types'
 
-export type Reply = { tldr?: string; you: string[]; notes: string[] }
+export type Reply = { tldr?: string; you: string[]; notes: string[]; closed: string[] }
 
 const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
 // Blockquote prefixes, then a bullet or a numbered-list marker.
@@ -12,13 +12,15 @@ const tag = (name: string, flags = '') => new RegExp(`^(${EM})${name}(?:(${EM}):
 const TLDR = tag('TL;DR', 'i')
 const YOU = tag('→\\s*You', 'i')
 const NOTE = tag('!\\s*Note', 'i')
+// ✔ or ✓, optionally in emoji presentation; `✔ Done` and `✔ Checked` do not match.
+const CLOSE = tag('[✔✓]\\uFE0F?\\s*You', 'i')
 
 export function normalize(text: string): string {
   return tidy(text).toLowerCase()
 }
 
 export function parseReply(answer: string): Reply {
-  const reply: Reply = { you: [], notes: [] }
+  const reply: Reply = { you: [], notes: [], closed: [] }
   let fence: string | undefined
   for (const raw of answer.split('\n')) {
     const line = raw.replace(BULLET, '')
@@ -39,6 +41,8 @@ export function parseReply(answer: string): Reply {
     if (you) reply.you.push(you)
     const note = grab(NOTE, line)
     if (note) reply.notes.push(note)
+    const closed = grab(CLOSE, line)
+    if (closed) reply.closed.push(closed)
   }
   return reply
 }
@@ -53,6 +57,39 @@ function grab(re: RegExp, line: string): string | undefined {
   return tidy(open && !closed && text.endsWith(open) ? text.slice(0, -open.length) : text)
 }
 
+// The reply format parseReply reads, taught once per conversation. Short: it is sent every session.
+// Only the example lines start with a tag, so the rules never parse as items.
+export const FORMAT = `Reply format (a side panel reads these lines):
+
+TL;DR  one line: the outcome
+✔ Done  what you did
+✔ Checked  what you verified
+→ You   what the user must do or decide
+! Note  risks
+
+- Start with the TL;DR line. A trivial answer is just that line.
+- Use → You only for what the user must do or decide, not what you can do yourself. One line each.
+- Optional: ✔ Done, ✔ Checked, ! Note; leave out empty ones.
+- One line per item. No filler, no recap.`
+
+// The checklist as the user sees it, sent with each prompt; nothing when it is empty.
+export function panelState(doc: Doc): string | undefined {
+  const open = doc.items.filter(item => !item.done)
+  const ticked = doc.items.filter(item => item.done)
+  if (!open.length && !ticked.length) return undefined
+  const list = (items: Item[]) => items.map(item => `- ${item.text}`).join('\n')
+  const parts = ['The → You checklist in the side panel:']
+  if (open.length) parts.push(`Open:\n${list(open)}`)
+  if (ticked.length) parts.push(`Ticked off by the user:\n${list(ticked)}`)
+  const rules = [
+    "Don't repeat these as → You lines unless they changed.",
+    "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
+  ]
+  if (open.length) rules.push('When an open item is done, close it with a line `✔ You <item text>`.')
+  parts.push(rules.join('\n'))
+  return parts.join('\n\n')
+}
+
 export function emptyDoc(sessionId: string): Doc {
   return { sessionId, turn: 0, tldr: '', goal: '', next: '', blockers: '', items: [] }
 }
@@ -60,7 +97,8 @@ export function emptyDoc(sessionId: string): Doc {
 export function applyReply(doc: Doc, reply: Reply): Doc {
   const turn = doc.turn + 1
   // Ticked items go away with the next reply; a reply that lists one again re-adds it as open.
-  const kept = doc.items.filter(item => !item.done)
+  // A `✔ You` line ticks an open item, which then stays until the reply after.
+  const kept = doc.items.filter(item => !item.done).map(item => (closes(reply.closed, item, doc.items) ? { ...item, done: true } : item))
   const seen = new Set(kept.map(item => normalize(item.text)))
   const added: Item[] = []
   for (const text of reply.you) {
@@ -70,6 +108,17 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
   }
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items: [...kept, ...added] }
+}
+
+// `✔ You <text>` closes the open item with that text, or the one open item it is a prefix of.
+function closes(closed: string[], item: Item, items: Item[]): boolean {
+  const key = normalize(item.text)
+  const open = items.filter(other => !other.done).map(other => normalize(other.text))
+  return closed.some(text => {
+    const want = normalize(text)
+    if (want === key) return true
+    return !open.includes(want) && key.startsWith(want) && open.filter(other => other.startsWith(want)).length === 1
+  })
 }
 
 export function toggle(doc: Doc, id: string): Doc {
