@@ -29,8 +29,20 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 - A `✔ You <number>` line ticks the open item with that number (`✔ You 2-3`, `✔ You 2-3 Run the migration`, `✔ You 2-1, 2-3`). Numbers may be separated by commas, spaces, `and` or `&`, may start with `#` and may use an en dash (`#2–3`). A number that matches no open item ticks nothing, and the text after it is not matched; numbers that match no item at all are read as text. A `→ You` line that starts with the number of an existing item is that item, not a new one.
 - A `✔ You <item>` line without a leading number ticks the open item with that text. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins.
 - `✓`, `✅` and `☑` work like `✔`. `✔ Done` and `✔ Checked` (with any of them) never tick anything.
+- A `✖ You <number>` line removes the item with that number (`✖ You 2-3`, `✖ You 2-1, 2-3`). Numbers only: text is never matched, so a removal is never a guess. `✗` and `❌` work like `✖`; `✖ Done` never removes anything. The same reply may list the text again, as a new item.
 - Lines inside code fences are skipped.
 - Repeats are matched with case and whitespace ignored.
+
+## Checklist tool
+
+Claude also keeps the checklist during a turn, not only through the reply text, with the `checklist` tool (`mcp__tldr-checklist__checklist`). Each call saves the checklist, so the pane updates right away, and answers the list.
+
+- `list`: the items, open first, each with its number, state (`open`, `done`, or `read`: ticked by you) and text.
+- `add`: `text`, one or a list. Adds open items like `→ You` lines, with the same repeat check. They are numbered in the reply in progress; `→ You` lines of that reply are numbered after them.
+- `close`: `ref`, one or a list. Ticks the items as done, as `✔ You <number>` does. They stay in the pane until the reply after this one.
+- `remove`: `ref`, one or a list. Deletes items that no longer apply, for example "Merge the PR" when you ask for another fix first. They leave the pane right away; added again later, an item gets a new number.
+
+Close means done; remove means withdrawn, not done. An unknown number changes nothing and the call says which. The tool is for the main conversation only: calls from subagents are refused. The reply format and the checklist state tell Claude to remove items your prompt makes premature or moot, and to add them again once they apply.
 
 ## Checklist state per prompt
 
@@ -38,13 +50,13 @@ With a prompt you send, Claude also gets the checklist as it stands, with item n
 
 At most the 10 newest open items are sent; with more, Claude is told how many older ones were left out and to ask you to tick off what is done or close one by its text. The pane keeps them all.
 
-The state is sent only when it changed since the last one sent (a new item, a tick by you or a reply). It is sent again after a compaction and after `/clear` or `/resume`, and at least every 5th prompt even when unchanged (Claude Code has no rewind event, and a rewind can drop the message that held it). A prompt that is dropped does not count as sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
+The state is sent only when it changed since the last one sent (a new item, a tick by you, a reply or a checklist tool call). It is sent again after a compaction and after `/clear` or `/resume`, and at least every 5th prompt even when unchanged (Claude Code has no rewind event, and a rewind can drop the message that held it). A prompt that is dropped does not count as sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
 
 The reply format is added to every conversation, subagents too, as the API offers no way to limit it to the main one. It says to follow another format as a subagent or when one is asked.
 
 ## Setting
 
-`inject` (on by default) sends both the reply format and the checklist state. Turn it off if you bring your own reply format: the pane then only reads the replies. Turning it off mid-conversation stops the checklist state right away; the reply format already sent stays until the next conversation or compaction. Change it in `/config`, or in settings:
+`inject` (on by default) sends both the reply format and the checklist state, and registers the checklist tool. Turn it off if you bring your own reply format: the pane then only reads the replies, and there is no checklist tool. Turning it off mid-conversation stops the checklist state right away; the reply format already sent stays until the next conversation or compaction. Change it in `/config`, or in settings:
 
 ```json
 { "pluginConfigs": { "tldr-checklist": { "options": { "inject": false } } } }
@@ -77,7 +89,7 @@ There is one JSON file per session:
 $CLAUDE_CONFIG_DIR/tldr-checklist/sessions/<session-id>.json
 ```
 
-If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, items: [{ id, text, done, firstSeenTurn, ref, tickedBy }] }`; `tickedBy` is `user` or `reply` on a ticked item. A file from before item numbers loads with numbers derived from `firstSeenTurn` and the order of the items. The file is written after every turn and every tick. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
+If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, lastRef, items: [{ id, text, done, firstSeenTurn, ref, tickedBy, closedTurn }] }`; `tickedBy` is `user` or `reply` on a ticked item, `closedTurn` the turn whose tool call closed it, and `lastRef` the last number handed out, so a removed item's number is not given again. A file from before item numbers loads with numbers derived from `firstSeenTurn` and the order of the items. The file is written after every turn, every tick and every checklist tool call. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
 
 ## Develop
 

@@ -2,7 +2,7 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, FORMAT, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -64,7 +64,7 @@ describe('parseReply', () => {
   })
 
   test('does not match longer words', () => {
-    expect(parseReply('TL;DRx\n→ Your thing\n→ Yours: x\n✔ Your x')).toEqual({ you: [], notes: [], closed: [] })
+    expect(parseReply('TL;DRx\n→ Your thing\n→ Yours: x\n✔ Your x')).toEqual({ you: [], notes: [], closed: [], removed: [] })
   })
 
   test('a fence closes only on the same character, enough marks and nothing after', () => {
@@ -107,11 +107,11 @@ describe('parseReply', () => {
   })
 
   test('→ You and ! Note ignore case', () => {
-    expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'], closed: [] })
+    expect(parseReply('→ you run x\n! note csv only')).toEqual({ you: ['run x'], notes: ['csv only'], closed: [], removed: [] })
   })
 
   test('a reply without the format yields nothing', () => {
-    expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [], closed: [] })
+    expect(parseReply('Just a plain answer.')).toEqual({ you: [], notes: [], closed: [], removed: [] })
   })
 
   test('reads ✔ You lines as closes, not ✔ Done or ✔ Checked, skipping code fences', () => {
@@ -273,10 +273,13 @@ describe('panelState', () => {
     expect(text).toContain('Open:\n- 1-1 Run the migration')
     expect(text).toContain('Ticked by the user (read; not necessarily done):\n- 1-2 Review the PR')
     expect(text).toContain('close it with a line: ✔ You <number>')
-    expect(text.split('\n').some(line => parseReply(line).you.length || parseReply(line).closed.length)).toBe(false)
+    expect(text).toContain("If the user's prompt makes an open item premature or moot, remove it now with the checklist tool")
+    const tagged = (line: string) => parseReply(line).you.length || parseReply(line).closed.length || parseReply(line).removed.length
+    expect(text.split('\n').some(tagged)).toBe(false)
     const ticked = panelState(toggle(doc, doc.items[0]!.id))!
     expect(ticked).not.toContain('Open:')
     expect(ticked).not.toContain('✔ You')
+    expect(ticked).not.toContain('checklist tool')
   })
 
   test('says nothing for an empty checklist', () => {
@@ -446,6 +449,125 @@ describe('re-listed with a number', () => {
   })
 })
 
+describe('checklist tool', () => {
+  const refs = (doc: Doc) => doc.items.map(i => [i.ref, i.text, i.done])
+  const run = (doc: Doc, input: Parameters<typeof applyTool>[1]) => {
+    const result = applyTool(doc, input)
+    if (!('doc' in result)) throw new Error(result.error)
+    return result.doc
+  }
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Merge the PR\n→ You Review the docs'))
+
+  test('list answers ref, state and text, open items first', () => {
+    let doc = run(start(), { action: 'close', ref: '1-1' })
+    doc = toggle(doc, doc.items[1]!.id)
+    doc = run(doc, { action: 'add', text: 'Deploy' })
+    expect(listText(doc)).toBe('2-1 [open] Deploy\n1-1 [done] Merge the PR\n1-2 [read] Review the docs\nread = ticked by the user, not necessarily done.')
+    expect(listText(emptyDoc('s1'))).toBe('The checklist is empty.')
+    expect(run(doc, { action: 'list' })).toBe(doc)
+  })
+
+  test('add numbers in the reply in progress, deduped like a → You line', () => {
+    const doc = run(start(), { action: 'add', text: ['Deploy', 'merge the  pr', 'Deploy', ' '] })
+    expect(refs(doc)).toEqual([
+      ['1-1', 'Merge the PR', false],
+      ['1-2', 'Review the docs', false],
+      ['2-1', 'Deploy', false],
+    ])
+    expect(applyTool(start(), { action: 'add', text: [] })).toEqual({ error: 'add needs text.' })
+  })
+
+  test('a → You line later in the same reply numbers after the tool', () => {
+    let doc = run(start(), { action: 'add', text: 'Deploy' })
+    doc = run(doc, { action: 'add', text: 'Tag it' })
+    doc = applyReply(doc, parseReply('→ You Announce it\n→ You Deploy'))
+    expect(refs(doc).slice(2)).toEqual([
+      ['2-1', 'Deploy', false],
+      ['2-2', 'Tag it', false],
+      ['2-3', 'Announce it', false],
+    ])
+    expect(doc.turn).toBe(2)
+  })
+
+  test('close ticks as the reply; the item stays until the reply after this one', () => {
+    let doc = run(start(), { action: 'close', ref: ['#1-1', '1–2'] })
+    expect(doc.items.map(i => [i.ref, i.done, i.tickedBy])).toEqual([
+      ['1-1', true, 'reply'],
+      ['1-2', true, 'reply'],
+    ])
+    doc = applyReply(doc, parseReply('TL;DR ok'))
+    expect(doc.items.map(i => i.ref)).toEqual(['1-1', '1-2'])
+    expect(panelState(doc)).toContain('Closed in your last reply:\n- 1-1 Merge the PR')
+    doc = applyReply(doc, parseReply('TL;DR ok'))
+    expect(doc.items).toEqual([])
+  })
+
+  test('remove deletes the item; adding it again gives a new number', () => {
+    let doc = run(start(), { action: 'remove', ref: '1-1' })
+    expect(refs(doc)).toEqual([['1-2', 'Review the docs', false]])
+    doc = run(doc, { action: 'add', text: 'Deploy' })
+    doc = run(doc, { action: 'remove', ref: '2-1' })
+    doc = run(doc, { action: 'add', text: ['Deploy', 'Merge the PR'] })
+    expect(refs(doc)).toEqual([
+      ['1-2', 'Review the docs', false],
+      ['2-2', 'Deploy', false],
+      ['2-3', 'Merge the PR', false],
+    ])
+    // The reply that ends this turn numbers after the removed one too.
+    doc = run(doc, { action: 'remove', ref: ['2-2', '2-3'] })
+    doc = applyReply(doc, parseReply('→ You Deploy'))
+    expect(refs(doc)).toEqual([
+      ['1-2', 'Review the docs', false],
+      ['2-4', 'Deploy', false],
+    ])
+  })
+
+  test('the last number handed out survives a reload', () => {
+    const doc = run(run(start(), { action: 'add', text: 'Deploy' }), { action: 'remove', ref: '2-1' })
+    const loaded = parseDoc(JSON.stringify(doc), 's1')!
+    expect(loaded.lastRef).toBe('2-1')
+    expect(refs(run(loaded, { action: 'add', text: 'Deploy' })).pop()).toEqual(['2-2', 'Deploy', false])
+  })
+
+  test('adding the text of a done item brings it back open, one item per id', () => {
+    const doc = run(run(start(), { action: 'close', ref: '1-1' }), { action: 'add', text: 'Merge the PR' })
+    expect(refs(doc)).toEqual([
+      ['1-2', 'Review the docs', false],
+      ['2-1', 'Merge the PR', false],
+    ])
+  })
+
+  test('unknown numbers and actions change nothing and say so', () => {
+    expect(applyTool(start(), { action: 'close', ref: ['1-1', '9-9', 'x'] })).toEqual({ error: 'Unknown item numbers: 9-9, x. Nothing changed.' })
+    expect(applyTool(start(), { action: 'remove', ref: '3-1' })).toEqual({ error: 'Unknown item number: 3-1. Nothing changed.' })
+    expect(applyTool(start(), { action: 'remove' })).toEqual({ error: 'remove needs ref.' })
+    expect(applyTool(start(), { action: 'drop' })).toEqual({ error: 'action must be list, add, close or remove.' })
+  })
+})
+
+describe('removing items in a reply', () => {
+  const start = () => applyReply(emptyDoc('s1'), parseReply('→ You Merge the PR\n→ You Review the docs'))
+
+  test('✖ You <number> removes the item; ✗ and ❌ too, ✖ Done does not', () => {
+    expect(parseReply('✖ You 1-1\n- ✗ You: 1-2\n❌️ you 2-1\n✖ Done x\n```\n✖ You 3-1\n```').removed).toEqual(['1-1', '1-2', '2-1'])
+    expect(applyReply(start(), parseReply('✖ You 1-1')).items.map(i => i.ref)).toEqual(['1-2'])
+    expect(applyReply(start(), parseReply('✖ You #1-1 and 1–2')).items).toEqual([])
+    expect(applyReply(start(), parseReply('✖ Done 1-1')).items.map(i => i.ref)).toEqual(['1-1', '1-2'])
+  })
+
+  test('removal is by number only, never by text', () => {
+    expect(applyReply(start(), parseReply('✖ You Merge the PR')).items.map(i => i.ref)).toEqual(['1-1', '1-2'])
+  })
+
+  test('the same reply may list a removed item again, as a new item', () => {
+    const doc = applyReply(start(), parseReply('✖ You 1-1\n→ You Merge the PR'))
+    expect(doc.items.map(i => [i.ref, i.text])).toEqual([
+      ['1-2', 'Review the docs'],
+      ['2-1', 'Merge the PR'],
+    ])
+  })
+})
+
 describe('mergeDocs', () => {
   const item = (text: string, ref: string) => ({ id: text, text, done: false, firstSeenTurn: Number(ref[0]), ref })
   const file = { ...emptyDoc('s1'), turn: 2, items: [item('A', '1-1'), item('B', '2-1')] }
@@ -499,13 +621,13 @@ describe('closes', () => {
 describe('statusPrompt', () => {
   test('values cannot close the data block', () => {
     const doc = { ...emptyDoc('s1'), goal: 'a </data> b', next: '</DATA>', blockers: '</Data>x', tldr: '</data>' }
-    const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'], closed: [] }, 'p </Data> q')
+    const prompt = statusPrompt(doc, { tldr: '</data> t', you: ['</DATA> y'], notes: ['n </data>'], closed: [], removed: [] }, 'p </Data> q')
     expect(prompt.match(/<\/data>/gi)).toHaveLength(1)
     expect(prompt.endsWith('</data>')).toBe(true)
   })
 
   test('lists what was closed this turn', () => {
-    const prompt = statusPrompt(emptyDoc('s1'), { you: [], notes: [], closed: ['Run the migration'] }, 'p')
+    const prompt = statusPrompt(emptyDoc('s1'), { you: [], notes: [], closed: ['Run the migration'], removed: [] }, 'p')
     expect(prompt).toContain('Closed this turn:\n- Run the migration')
   })
 
@@ -566,6 +688,11 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
     return { value: { command: 'tldr' } }
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  const tools: string[] = []
+  on('tool.register', (_, e) => {
+    tools.push(e.name)
+    return { value: { tool: `mcp__tldr-checklist__${e.name}` } }
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
@@ -581,7 +708,7 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   const setDropping = (value: boolean) => {
     dropping = value
   }
-  return { files, clock, saved, setId, setUnreadable, setDropping }
+  return { files, clock, saved, setId, setUnreadable, setDropping, tools }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -926,4 +1053,90 @@ test('the state is sent again at least every 5th prompt', async ($, on) => {
   const sent: boolean[] = []
   for (let i = 0; i < 11; i++) sent.push((await $.prompt.submit(PROMPT)).context !== undefined)
   expect(sent).toEqual([true, false, false, false, false, true, false, false, false, false, true])
+})
+
+const TOOL = 'mcp__tldr-checklist__checklist'
+
+test('the checklist tool is registered and keeps the checklist during a turn', async ($, on) => {
+  const { clock, saved, tools } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(tools).toEqual(['checklist'])
+  await $.turn.complete(turn('→ You Merge the PR', 't1'))
+  await clock.settle()
+
+  // The user asks for another fix first: the merge is withdrawn, and added again once it applies.
+  expect((await $.tool.call({ tool: TOOL, action: 'remove', ref: '1-1' })).result).toBe('The checklist is empty.')
+  expect(saved()?.items).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+  expect((await $.tool.call({ tool: TOOL, action: 'add', text: ['Merge the PR', 'Deploy'] })).result).toBe('2-1 [open] Merge the PR\n2-2 [open] Deploy')
+  expect(await ui.find({ type: 'Text', text: /\[ \] 2-1 Merge the PR/ })).toBeDefined()
+  expect((await $.tool.call({ tool: TOOL, action: 'close', ref: '2-2' })).result).toBe('2-1 [open] Merge the PR\n2-2 [done] Deploy')
+  expect((await ui.find({ type: 'Text', text: /\[x\] 2-2 Deploy/ }))?.props.strikethrough).toBe(true)
+  await ui.unmount()
+  expect((await $.tool.call({ tool: TOOL, action: 'list' })).result).toBe('2-1 [open] Merge the PR\n2-2 [done] Deploy')
+
+  // The reply that ends the turn numbers after the tool's items and keeps the closed one for one reply.
+  await $.turn.complete(turn('TL;DR fixed\n→ You Review the fix', 't2'))
+  await clock.settle()
+  expect(saved()?.items.map(i => [i.ref, i.text, i.done])).toEqual([
+    ['2-1', 'Merge the PR', false],
+    ['2-2', 'Deploy', true],
+    ['2-3', 'Review the fix', false],
+  ])
+})
+
+test('the checklist tool names unknown numbers and changes nothing', async ($, on) => {
+  const { clock, saved } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('→ You Merge the PR', 't1'))
+  await clock.settle()
+  expect(await $.tool.call({ tool: TOOL, action: 'close', ref: ['1-1', '7-7'] })).toEqual({ deny: 'Unknown item number: 7-7. Nothing changed.' })
+  expect(saved()?.items.map(i => i.done)).toEqual([false])
+})
+
+test('subagents cannot use the checklist tool', async ($, on) => {
+  const { clock, saved } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('→ You Merge the PR', 't1'))
+  await clock.settle()
+  for (const action of ['list', 'remove'] as const) {
+    const result = await $.tool.call({ tool: TOOL, action, ref: '1-1', agentId: 'a1' })
+    expect(result.deny).toBe('The checklist belongs to the main conversation; a subagent cannot use it.')
+  }
+  expect(saved()?.items).toHaveLength(1)
+})
+
+test('a change through the tool is sent with the next prompt', async ($, on) => {
+  const { clock } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('→ You Merge the PR', 't1'))
+  await clock.settle()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  await $.tool.call({ tool: TOOL, action: 'remove', ref: '1-1' })
+  await $.tool.call({ tool: TOOL, action: 'add', text: 'Deploy' })
+  const context = (await $.prompt.submit(PROMPT)).context!
+  expect(context[0]).toContain('Open:\n- 2-1 Deploy')
+  expect(context[0]).not.toContain('Merge the PR')
+  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+})
+
+test('with inject off, the checklist tool is not registered', { options: { inject: false } }, async ($, on) => {
+  const { tools } = world(on, undefined)
+  // Nothing in the plugin answers the call: it reaches what stands beneath.
+  on('tool.call', { tool: TOOL }, () => ({ deny: 'no such tool' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(tools).toEqual([])
+  expect(await $.tool.call({ tool: TOOL, action: 'list' })).toEqual({ deny: 'no such tool' })
+})
+
+test('a ✖ You line in the reply removes the item', async ($, on) => {
+  const { clock, saved } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn('→ You Merge the PR\n→ You Deploy', 't1'))
+  await clock.settle()
+  await $.turn.complete(turn('TL;DR another fix first\n✖ You 1-1\n✖ Done 1-2', 't2'))
+  await clock.settle()
+  expect(saved()?.items.map(i => i.ref)).toEqual(['1-2'])
 })

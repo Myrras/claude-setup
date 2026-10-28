@@ -1,6 +1,6 @@
 import type { Doc, Item, Status } from '../types'
 
-export type Reply = { tldr?: string; you: string[]; notes: string[]; closed: string[] }
+export type Reply = { tldr?: string; you: string[]; notes: string[]; closed: string[]; removed: string[] }
 
 const FENCE = /^\s*(`{3,}|~{3,})(.*)$/
 // Blockquote prefixes, then a bullet or a numbered-list marker.
@@ -14,6 +14,8 @@ const YOU = tag('→\\s*You', 'i')
 const NOTE = tag('!\\s*Note', 'i')
 // ✔, ✓, ✅ or ☑, optionally in emoji presentation; `✔ Done` and `✔ Checked` do not match.
 const CLOSE = tag('[✔✓✅☑]\\uFE0F?\\s*You', 'i')
+// ✖, ✗ or ❌: withdraws an item by number; `✖ Done` does not match.
+const REMOVE = tag('[✖✗❌]\\uFE0F?\\s*You', 'i')
 // Leading item numbers of a close (`2-3`, `#2-3`, `2–3`, `2-1, 2-3`, `2-1 2-3`, `2-1 and 2-3`, `2-1 & 2-3`),
 // then the end or a non-word character.
 const REF = '#?\\d+[-–]\\d+'
@@ -30,7 +32,7 @@ export function normalize(text: string): string {
 }
 
 export function parseReply(answer: string): Reply {
-  const reply: Reply = { you: [], notes: [], closed: [] }
+  const reply: Reply = { you: [], notes: [], closed: [], removed: [] }
   let fence: string | undefined
   for (const raw of answer.split('\n')) {
     const line = raw.replace(BULLET, '')
@@ -53,6 +55,8 @@ export function parseReply(answer: string): Reply {
     if (note) reply.notes.push(note)
     const closed = grab(CLOSE, line)
     if (closed) reply.closed.push(closed)
+    const removed = grab(REMOVE, line)
+    if (removed) reply.removed.push(removed)
   }
   return reply
 }
@@ -81,6 +85,7 @@ TL;DR  one line: the outcome
 - Use → You only for what the user must do or decide, not what you can do yourself. One line each.
 - Optional: ✔ Done, ✔ Checked, ! Note; leave out empty ones.
 - One line per item. No filler, no recap.
+- Keep the → You checklist current while you work, with the checklist tool: remove items that no longer apply (e.g. "merge the PR" when the user asks for another fix first) and add them again once they apply.
 For replies to the user only; as a subagent, or when a specific output format is asked, follow that instead.`
 
 // The checklist as the user sees it, sent with each prompt; nothing when it is empty.
@@ -103,6 +108,7 @@ export function panelState(doc: Doc): string | undefined {
     "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
   ]
   if (open.length) rules.push('When an open item is done, close it with a line: ✔ You <number>')
+  if (open.length) rules.push("If the user's prompt makes an open item premature or moot, remove it now with the checklist tool; add it again when it applies again.")
   if (read.length) rules.push('A user tick means read, not done: mention such an item only if it still needs doing.')
   parts.push(rules.join('\n'))
   return parts.join('\n\n')
@@ -110,6 +116,19 @@ export function panelState(doc: Doc): string | undefined {
 
 function refTurn(ref: string): number {
   return Number(ref.split('-')[0])
+}
+
+// The next number in a turn: after its items and the last number handed out there, so a removed item's is never reused.
+function nextN(doc: Doc, turn: number): number {
+  const ns = doc.items.filter(item => refTurn(item.ref) === turn).map(item => Number(item.ref.split('-')[1]))
+  const last = doc.lastRef && refTurn(doc.lastRef) === turn ? Number(doc.lastRef.split('-')[1]) : 0
+  return Math.max(last, ...ns) + 1
+}
+
+// `#2-1` and `2–1` are 2-1.
+function refsIn(text: string): string[] {
+  const refs = REFS.exec(closeKey(text))
+  return refs ? refs[0].match(/\d+[-–]\d+/g)!.map(ref => ref.replace('–', '-')) : []
 }
 
 // Oldest first: by the reply that added the item, then its place in that reply.
@@ -125,12 +144,17 @@ export function emptyDoc(sessionId: string): Doc {
 
 export function applyReply(doc: Doc, reply: Reply): Doc {
   const turn = doc.turn + 1
-  // Ticked items go away with the next reply; a reply that lists one again re-adds it as open.
-  // A `✔ You` line then ticks an item, one the same reply lists included; it stays until the reply after.
-  const kept = doc.items.filter(item => !item.done)
+  // `✖ You <number>` withdraws an item first, so the same reply may list its text again as a new item.
+  const gone = new Set(reply.removed.flatMap(refsIn))
+  const remaining = doc.items.filter(item => !gone.has(item.ref))
+  // Ticked items go away with the next reply (one closed with the tool during this turn stays); a reply that
+  // lists one again re-adds it as open. A `✔ You` line then ticks an item, one the same reply lists included;
+  // it stays until the reply after.
+  const kept = remaining.filter(item => !item.done || item.closedTurn === turn)
   const seen = new Set(kept.map(item => normalize(item.text)))
-  const byRefs = new Map(doc.items.map(item => [item.ref, item]))
-  // An item number is the reply's turn and the item's place among the ones that reply added; never reused.
+  const byRefs = new Map(remaining.map(item => [item.ref, item]))
+  // An item number is the reply's turn and the item's place among the ones that turn added; never reused.
+  const first = nextN(doc, turn)
   const added: Item[] = []
   for (const line of reply.you) {
     // A line that starts with the number of an existing item is that item, listed again.
@@ -141,14 +165,63 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     const key = normalize(text)
     if (seen.has(key)) continue
     seen.add(key)
-    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${added.length + 1}` })
+    added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${first + added.length}` })
   }
   const open = [...kept, ...added]
-  const every = [...new Map([...doc.items, ...open].map(item => [item.id, item])).values()]
+  const every = [...new Map([...remaining, ...open].map(item => [item.id, item])).values()]
   const keys = every.map(item => closeKey(item.text))
   const known = { all: new Set(keys), every: keys, refs: new Set(every.map(item => item.ref)) }
   const items = open.map(item => (closes(reply.closed, item, known) ? { ...item, done: true, tickedBy: 'reply' as const } : item))
-  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
+  const lastRef = added.length ? `${turn}-${first + added.length - 1}` : doc.lastRef
+  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items, ...(lastRef ? { lastRef } : {}) }
+}
+
+export type ToolInput = { action?: unknown; text?: unknown; ref?: unknown }
+
+// The checklist tool, during a turn: numbers go to the reply in progress (doc.turn + 1).
+// Unknown numbers change nothing and give an error naming them.
+export function applyTool(doc: Doc, input: ToolInput): { doc: Doc } | { error: string } {
+  const strings = (value: unknown) => (Array.isArray(value) ? value : [value]).filter((v): v is string => typeof v === 'string')
+  const turn = doc.turn + 1
+  if (input.action === 'list') return { doc }
+  if (input.action === 'add') {
+    const texts = strings(input.text).map(tidy).filter(Boolean)
+    if (!texts.length) return { error: 'add needs text.' }
+    const open = new Set(doc.items.filter(item => !item.done).map(item => normalize(item.text)))
+    const first = nextN(doc, turn)
+    const added: Item[] = []
+    for (const text of texts) {
+      const key = normalize(text)
+      if (open.has(key)) continue
+      open.add(key)
+      added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn, ref: `${turn}-${first + added.length}` })
+    }
+    if (!added.length) return { doc }
+    // A done item with the same text makes way, so ids stay unique.
+    const ids = new Set(added.map(item => item.id))
+    const items = [...doc.items.filter(item => !ids.has(item.id)), ...added]
+    return { doc: { ...doc, items, lastRef: `${turn}-${first + added.length - 1}` } }
+  }
+  if (input.action !== 'close' && input.action !== 'remove') return { error: 'action must be list, add, close or remove.' }
+  const wanted = strings(input.ref).map(ref => tidy(ref).replace(/^#/, '').replace('–', '-'))
+  if (!wanted.length) return { error: `${input.action} needs ref.` }
+  const known = new Set(doc.items.map(item => item.ref))
+  const unknown = wanted.filter(ref => !known.has(ref))
+  if (unknown.length) return { error: `Unknown item number${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. Nothing changed.` }
+  const hit = (item: Item) => wanted.includes(item.ref)
+  if (input.action === 'remove') return { doc: { ...doc, items: doc.items.filter(item => !hit(item)) } }
+  const close = (item: Item): Item => ({ ...item, done: true, tickedBy: 'reply', closedTurn: turn })
+  return { doc: { ...doc, items: doc.items.map(item => (hit(item) ? close(item) : item)) } }
+}
+
+// The checklist as the tool answers it: open items first, oldest first.
+export function listText(doc: Doc): string {
+  if (!doc.items.length) return 'The checklist is empty.'
+  const state = (item: Item) => (!item.done ? 'open' : item.tickedBy === 'reply' ? 'done' : 'read')
+  const items = [...doc.items].sort((a, b) => Number(a.done) - Number(b.done) || byRef(a, b))
+  const lines = items.map(item => `${item.ref} [${state(item)}] ${item.text}`)
+  if (items.some(item => state(item) === 'read')) lines.push('read = ticked by the user, not necessarily done.')
+  return lines.join('\n')
 }
 
 // Texts of the items the reply ticked.
@@ -177,11 +250,8 @@ function closes(closed: string[], item: Item, { all, every, refs: known }: { all
   return closed.some(text => {
     const want = closeKey(text)
     if (!want) return false
-    const refs = REFS.exec(want)
-    if (refs) {
-      const wanted = refs[0].match(/\d+[-–]\d+/g)!.map(ref => ref.replace('–', '-'))
-      if (wanted.some(ref => known.has(ref))) return wanted.includes(item.ref)
-    }
+    const wanted = refsIn(want)
+    if (wanted.some(ref => known.has(ref))) return wanted.includes(item.ref)
     if (want === key) return true
     if (all.has(want)) return false
     const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}'’-]/u.test(other[want.length] ?? ' ')
@@ -191,7 +261,8 @@ function closes(closed: string[], item: Item, { all, every, refs: known }: { all
 
 // A user tick means read, not necessarily done.
 export function toggle(doc: Doc, id: string): Doc {
-  const flip = (item: Item): Item => (item.done ? { ...item, done: false, tickedBy: undefined } : { ...item, done: true, tickedBy: 'user' })
+  const flip = (item: Item): Item =>
+    item.done ? { ...item, done: false, tickedBy: undefined, closedTurn: undefined } : { ...item, done: true, tickedBy: 'user', closedTurn: undefined }
   return { ...doc, items: doc.items.map(item => (item.id === id ? flip(item) : item)) }
 }
 
@@ -211,6 +282,7 @@ export function parseDoc(text: string, sessionId: string): Doc | undefined {
       next: str(value.next),
       blockers: str(value.blockers),
       items,
+      ...(typeof value.lastRef === 'string' && VALID_REF.test(value.lastRef) ? { lastRef: value.lastRef } : {}),
     }
   } catch {
     return undefined
@@ -289,6 +361,7 @@ function isItem(value: unknown): value is Stored {
     typeof item.text === 'string' &&
     typeof item.done === 'boolean' &&
     typeof item.firstSeenTurn === 'number' &&
+    (item.closedTurn === undefined || typeof item.closedTurn === 'number') &&
     (item.tickedBy === undefined || item.tickedBy === 'user' || item.tickedBy === 'reply')
   )
 }

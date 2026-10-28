@@ -2,14 +2,30 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, emptyDoc, FORMAT, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
-import type { Reply } from './parse'
+import { applyReply, applyTool, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
 const TITLE = 'TL;DR'
 const FORMAT_BLOCK = 'replyFormat'
+const TOOL = 'mcp__tldr-checklist__checklist'
+const TOOL_SPEC = {
+  name: 'checklist',
+  description:
+    'The → You checklist in the side panel. list: show it. add: add open items (text). close: mark items done (ref). remove: withdraw items that no longer apply (ref); add them again once they apply. Every action answers the list.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['list', 'add', 'close', 'remove'] },
+      text: { description: 'add: item text, or a list of them', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+      ref: { description: 'close, remove: item number like 2-1, or a list of them', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+    },
+    required: ['action'],
+  },
+  isDeferred: false,
+}
 
-// Change the tag when Doc's fields change: an older value then reads as empty.
+// Change the tag when Doc's fields change (a new optional field needs none): an older value then reads as empty.
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-2' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
 const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
@@ -151,6 +167,27 @@ export const register: Register = (on, options) => {
       }
       return result
     })
+
+    // The checklist during a turn, not only through the reply. The main conversation's alone.
+    on('tool.call', { tool: TOOL }, async ($, e) => {
+      if (e.agentId !== undefined) return { deny: 'The checklist belongs to the main conversation; a subagent cannot use it.' }
+      try {
+        const input = e as ToolInput
+        const held = await current($)
+        if (input.action === 'list') return { result: listText(held) }
+        // The update may run again on a newer value; its last run decides.
+        const outcome = { error: '' }
+        const updated = await change($, value => {
+          const result = applyTool(value, input)
+          outcome.error = 'error' in result ? result.error : ''
+          return 'doc' in result ? result.doc : value
+        })
+        return outcome.error ? { deny: outcome.error } : { result: listText(updated) }
+      } catch (error) {
+        $.ui.log(`tldr-checklist: could not run the checklist tool (${String(error)})`)
+        return { deny: `The checklist could not be read or saved (${String(error)}).` }
+      }
+    })
   }
 
   on('session.start', async ($, e, next) => {
@@ -161,6 +198,7 @@ export const register: Register = (on, options) => {
     await step('save settings', () => update($, interactive, () => e.isInteractive))
     if (e.isInteractive) await step('open pane', () => $.ui.open({ id: PANE, title: TITLE, backgroundColor: 'transparent' }))
     await step('register command', () => $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' }))
+    if (options.inject !== false) await step('register tool', () => $.tool.register(TOOL_SPEC))
     await step('load state', () => current($))
 
     return next(e)
