@@ -18,19 +18,35 @@ jobs:
         env:
           BASE: ${{ github.base_ref }}
         run: |
-          other=$(git diff --name-only "origin/$BASE...HEAD" | grep -vE '^(README\.md|LICENSE|tests/|\.github/)' || true)
-          if [ -z "$other" ]; then
-            echo "::notice::Only README, LICENSE, tests or .github changed, skipping version check"
+          changed=$(git diff --name-only "origin/$BASE...HEAD")
+          plugins=$(echo "$changed" | grep -E '^plugins/[^/]+/' | grep -vE '^plugins/[^/]+/(README\.md|LICENSE|tests/)' | cut -d/ -f2 | sort -u || true)
+          if [ -z "$plugins" ]; then
+            echo "::notice::No plugin changes needing a version bump, skipping version check"
             exit 0
           fi
-          head_v=$(jq -r .version .claude-plugin/plugin.json)
-          base_v=$(git show "origin/$BASE:.claude-plugin/plugin.json" | jq -r .version)
-          if ! echo "$head_v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Invalid version '$head_v' (base: '$base_v'), expected X.Y.Z"
-            exit 1
-          fi
-          if [ "$head_v" = "$base_v" ] || [ "$(printf '%s\n%s\n' "$base_v" "$head_v" | sort -V | tail -n1)" != "$head_v" ]; then
-            echo "::error::Version not bumped: head $head_v, base $base_v"
-            exit 1
-          fi
-          echo "Version bumped: base $base_v -> head $head_v"
+          failed=0
+          for p in $plugins; do
+            f="plugins/$p/.claude-plugin/plugin.json"
+            [ -f "$f" ] || continue
+            head_v=$(jq -r .version "$f")
+            base_v=""
+            if git cat-file -e "origin/$BASE:$f" 2>/dev/null; then
+              base_v=$(git show "origin/$BASE:$f" | jq -r .version)
+            fi
+            if ! echo "$head_v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::$p: Invalid version '$head_v' (base: '$base_v'), expected X.Y.Z"
+              failed=1
+              continue
+            fi
+            if [ -z "$base_v" ]; then
+              echo "New plugin: $p $head_v"
+              continue
+            fi
+            if [ "$head_v" = "$base_v" ] || [ "$(printf '%s\n%s\n' "$base_v" "$head_v" | sort -V | tail -n1)" != "$head_v" ]; then
+              echo "::error::$p: Version not bumped: head $head_v, base $base_v"
+              failed=1
+              continue
+            fi
+            echo "Version bumped: $p $base_v -> $head_v"
+          done
+          exit $failed
