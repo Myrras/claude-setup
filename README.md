@@ -13,4 +13,4 @@ Existing installs: run `claude plugin marketplace update robbieminderhoud`, noth
 ## Plugins
 
 - [orchestrator-mode](plugins/orchestrator-mode/): Main session orchestrates and verifies; subagents make every change. Enforced by a PreToolUse hook.
-- [tldr-checklist](plugins/tldr-checklist/): Side pane with the latest TL;DR, the session's goal, next step and blockers, and a persistent checklist of every → You line
+- [tldr-checklist](plugins/tldr-checklist/): Teaches a TL;DR / → You reply format; side pane with the latest TL;DR, goal, next step, blockers and a persistent → You checklist

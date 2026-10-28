@@ -2,16 +2,39 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, emptyDoc, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
-import type { Reply } from './parse'
+import { applyReply, applyTool, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
 const TITLE = 'TL;DR'
+const FORMAT_BLOCK = 'replyFormat'
+const TOOL = 'mcp__tldr-checklist__checklist'
+const TOOL_SPEC = {
+  name: 'checklist',
+  description:
+    'The → You checklist in the side panel. list: show it. add: add open items (text). close: mark items done (ref). remove: withdraw items that no longer apply (ref); add them again once they apply. Every action answers the list.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['list', 'add', 'close', 'remove'] },
+      text: { description: 'add: item text, or a list of them', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+      ref: { description: 'close, remove: item number like 2-1, or a list of them', anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+    },
+    required: ['action'],
+  },
+  isDeferred: false,
+}
 
-// Change the tag when Doc's fields change: an older value then reads as empty.
-const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-1' })
+// Change the tag when Doc's fields change (a new optional field needs none): an older value then reads as empty.
+const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-2' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
 const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
+// The checklist state last sent, and the prompts since; a prompt sends it only when it changed or
+// RESEND_EVERY prompts passed (the API has no rewind event, and a rewind can drop the message that held it).
+// Cleared on a compaction, /clear and /resume.
+const RESEND_EVERY = 5
+const NOTHING_SENT = { sessionId: '', text: '', count: 0 }
+const sent = atom({ plugin: 'tldr-checklist', key: 'sent' } as const, NOTHING_SENT)
 
 async function stateFile($: EngineInterface, sessionId: string): Promise<string | undefined> {
   const home = await $.env.get('HOME')
@@ -23,19 +46,7 @@ async function stateFile($: EngineInterface, sessionId: string): Promise<string 
 const unreadable = atom({ plugin: 'tldr-checklist', key: 'unreadable' } as const, '')
 
 // A doc from a failed read, kept in memory, joins the file once it reads again.
-function merge(file: Doc, held: Doc): Doc {
-  const ids = new Set(file.items.map(item => item.id))
-  const pick = (key: 'tldr' | 'goal' | 'next' | 'blockers') => held[key] || file[key]
-  return {
-    ...file,
-    turn: Math.max(file.turn, held.turn),
-    tldr: pick('tldr'),
-    goal: pick('goal'),
-    next: pick('next'),
-    blockers: pick('blockers'),
-    items: [...file.items, ...held.items.filter(item => !ids.has(item.id))],
-  }
-}
+const merge = mergeDocs
 
 // The session id changes on /clear and /resume; the doc follows it, loading that session's file.
 async function current($: EngineInterface): Promise<Doc> {
@@ -111,7 +122,79 @@ async function refreshStatus(
   await change($, value => (value.sessionId === sessionId && turn === statusTurn ? { ...value, ...status } : value))
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // Off for those who bring their own reply format: nothing is added to what the model reads.
+  if (options.inject !== false) {
+    // Once per conversation, sent again after a compaction. It fires for subagents too, so it resets nothing.
+    on('prompt.context', async ($, e, next) => {
+      return next({ ...e, blocks: [...e.blocks.filter(block => block.name !== FORMAT_BLOCK), { name: FORMAT_BLOCK, text: FORMAT }] })
+    })
+
+    // After a compaction the state is gone from the history: send it with the next prompt.
+    on('session.compact', async ($, e, next) => {
+      const result = await next(e)
+      if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages) {
+        await update($, sent, () => NOTHING_SENT).catch(error => $.ui.log(`tldr-checklist: could not reset the sent state (${String(error)})`))
+      }
+      return result
+    })
+
+    // A prompt carries the checklist when it changed since the last one sent, so replies neither repeat nor miss items.
+    on('prompt.submit', async ($, e, next) => {
+      // Only what the user typed: not commands, meta or queued deliveries, task notifications, peers, triggers or plugin prompts.
+      // Headless runs never apply `✔ You` lines, so the state would only go stale.
+      const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+      if (e.command || e.isMeta || e.turnId !== undefined || !typed || !(await read($, interactive))) return next(e)
+      let state: string | undefined
+      let plan: { sessionId: string; text: string; send: boolean } | undefined
+      try {
+        const value = await current($)
+        const text = panelState(value) ?? ''
+        const last = await read($, sent)
+        const send = last.sessionId !== value.sessionId || last.text !== text || last.count + 1 >= RESEND_EVERY
+        plan = { sessionId: value.sessionId, text, send }
+        if (send) state = text || undefined
+      } catch (error) {
+        $.ui.log(`tldr-checklist: could not read the checklist (${String(error)})`)
+      }
+      const result = await next(state ? { ...e, context: [...(e.context ?? []), state] } : e)
+      // Counted as sent only when the prompt went in.
+      if (plan && !result.drop) {
+        const { sessionId, text, send } = plan
+        await update($, sent, v => (send ? { sessionId, text, count: 0 } : { ...v, count: v.count + 1 })).catch(error =>
+          $.ui.log(`tldr-checklist: could not save the sent state (${String(error)})`),
+        )
+      }
+      return result
+    })
+  }
+
+  // The checklist during a turn, not only through the reply. The main conversation's alone.
+  // Registered always: the tool list only changes at the next session start, so a call after `inject` went off is refused.
+  on('tool.call', { tool: TOOL }, async ($, e) => {
+    if (options.inject === false) return { deny: 'The checklist tool is off (inject setting).' }
+    if (e.agentId !== undefined) return { deny: 'The checklist belongs to the main conversation; a subagent cannot use it.' }
+    try {
+      const input = e as ToolInput
+      const held = await current($)
+      if (input.action === 'list') return { result: listText(held) }
+      // The update may run again on a newer value; its last run decides.
+      const outcome = { error: '', changed: false }
+      const updated = await update($, doc, value => {
+        const result = applyTool(value, input)
+        outcome.error = 'error' in result ? result.error : ''
+        outcome.changed = 'doc' in result && result.doc !== value
+        return 'doc' in result ? result.doc : value
+      })
+      if (outcome.error) return { deny: outcome.error }
+      if (outcome.changed) await save($, updated)
+      return { result: listText(updated) }
+    } catch (error) {
+      $.ui.log(`tldr-checklist: could not run the checklist tool (${String(error)})`)
+      return { deny: `The checklist could not be read or saved (${String(error)}).` }
+    }
+  })
+
   on('session.start', async ($, e, next) => {
     const step = (what: string, fn: () => unknown) =>
       Promise.resolve()
@@ -120,6 +203,7 @@ export const register: Register = on => {
     await step('save settings', () => update($, interactive, () => e.isInteractive))
     if (e.isInteractive) await step('open pane', () => $.ui.open({ id: PANE, title: TITLE, backgroundColor: 'transparent' }))
     await step('register command', () => $.command.register({ name: 'tldr', description: 'Show the TL;DR and → You checklist pane' }))
+    if (options.inject !== false) await step('register tool', () => $.tool.register(TOOL_SPEC))
     await step('load state', () => current($))
 
     return next(e)
@@ -136,6 +220,7 @@ export const register: Register = on => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, doc, () => emptyDoc(''))
+      await update($, sent, () => NOTHING_SENT)
       // The new id may arrive late: check again every 100 ms, then leave it to the next turn.complete.
       const check = (left: number) => {
         $.session
@@ -165,12 +250,14 @@ export const register: Register = on => {
       const prompt = await read($, lastPrompt)
       const { sessionId } = await current($)
       const updated = await change($, value => applyReply(value, reply))
-      if (!reply.tldr && !reply.you.length && !reply.notes.length) return done
+      // Only the closes that ticked something count.
+      const closed = ticked(updated)
+      if (!reply.tldr && !reply.you.length && !reply.notes.length && !closed.length) return done
       const { turn } = updated
       statusTurn = turn
       // The status call runs after the turn so it never holds up the prompt.
       $.clock.after(0, () => {
-        refreshStatus($, reply, sessionId, turn, prompt).catch(error =>
+        refreshStatus($, withoutClosed(reply, closed), sessionId, turn, prompt).catch(error =>
           $.ui.log(`tldr-checklist: could not refresh status (${String(error)})`),
         )
       })
@@ -195,7 +282,7 @@ export const register: Register = on => {
       <Button key={item.id} plain onPress={() => change($, d => toggle(d, item.id))}>
         <Text dimColor={item.done} strikethrough={item.done}>
           {item.done ? '[x] ' : '[ ] '}
-          {item.text}
+          {item.ref} {item.text}
         </Text>
       </Button>
     )
@@ -216,6 +303,11 @@ export const register: Register = on => {
             → You <Text dimColor>({open} open)</Text>
           </Text>
           {value.items.length === 0 && <Text dimColor>Nothing for you yet.</Text>}
+          {open >= OPEN_CAP && (
+            <Text color="warning" dimColor>
+              {OPEN_CAP}+ open items — tick off what you have read
+            </Text>
+          )}
           {value.items.map(row)}
         </Box>
       </Box>
