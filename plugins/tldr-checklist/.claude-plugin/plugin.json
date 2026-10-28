@@ -1,6 +1,6 @@
 {
   "name": "tldr-checklist",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Side pane with the latest TL;DR, the session's goal, next step and blockers, and a persistent checklist of every → You line",
   "author": {
     "name": "RobbieMinderhoud"
