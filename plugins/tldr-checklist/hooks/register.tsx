@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, emptyDoc, FORMAT, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle } from './parse'
+import { applyReply, emptyDoc, FORMAT, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 import type { Reply } from './parse'
 
 const PANE = 'tldr-checklist'
@@ -196,7 +196,7 @@ export const register: Register = (on, options) => {
       statusTurn = turn
       // The status call runs after the turn so it never holds up the prompt.
       $.clock.after(0, () => {
-        refreshStatus($, { ...reply, closed }, sessionId, turn, prompt).catch(error =>
+        refreshStatus($, withoutClosed(reply, closed), sessionId, turn, prompt).catch(error =>
           $.ui.log(`tldr-checklist: could not refresh status (${String(error)})`),
         )
       })

@@ -109,14 +109,21 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
   }
   const open = [...kept, ...added]
-  const all = new Set([...doc.items, ...open].map(item => closeKey(item.text)))
-  const items = open.map(item => (closes(reply.closed, item, all) ? { ...item, done: true } : item))
+  const every = [...new Map([...doc.items, ...open].map(item => [item.id, item])).values()].map(item => closeKey(item.text))
+  const all = new Set(every)
+  const items = open.map(item => (closes(reply.closed, item, all, every) ? { ...item, done: true } : item))
   return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
 }
 
 // Texts of the items the reply ticked.
 export function ticked(after: Doc): string[] {
   return after.items.filter(item => item.done).map(item => item.text)
+}
+
+// A close beats a re-list: drop the → You texts the same reply closed.
+export function withoutClosed(reply: Reply, closed: string[]): Reply {
+  const gone = new Set(closed.map(normalize))
+  return { ...reply, you: reply.you.filter(text => !gone.has(normalize(text))), closed }
 }
 
 // Looser than normalize, for closes only: no code ticks, emphasis marks or trailing punctuation.
@@ -127,7 +134,7 @@ function closeKey(text: string): string {
 // `✔ You <text>` closes the item with that text, or the one item whose first words it is.
 // Text that equals any item never prefix-matches another; a prefix ends at a non-word character
 // (letters, digits, - and ' are word characters) and is ambiguous when it fits several of all items.
-function closes(closed: string[], item: Item, all: Set<string>): boolean {
+function closes(closed: string[], item: Item, all: Set<string>, every: string[]): boolean {
   const key = closeKey(item.text)
   return closed.some(text => {
     const want = closeKey(text)
@@ -135,7 +142,7 @@ function closes(closed: string[], item: Item, all: Set<string>): boolean {
     if (want === key) return true
     if (all.has(want)) return false
     const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}'’-]/u.test(other[want.length] ?? ' ')
-    return starts(key) && [...all].filter(starts).length === 1
+    return starts(key) && every.filter(starts).length === 1
   })
 }
 
