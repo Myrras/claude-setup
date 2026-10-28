@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, emptyDoc, FORMAT, normalize, panelState, parseDoc, parseReply, parseStatus, statusPrompt, toggle } from './parse'
+import { applyReply, emptyDoc, FORMAT, normalize, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -203,6 +203,39 @@ describe('closing items', () => {
       ['Deploy', true],
       ['Deploy to staging', false],
     ])
+  })
+
+  test('an exact match with a ticked item blocks the prefix rule', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy\n→ You Deploy to staging'))
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('✔ You Deploy'))
+    expect(state(doc)).toEqual([['Deploy to staging', false]])
+  })
+
+  test('a prefix ends at punctuation, not inside a word', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy, then verify\n→ You Deploying the app'))
+    doc = applyReply(doc, parseReply('✔ You Deploy'))
+    expect(state(doc)).toEqual([
+      ['Deploy, then verify', true],
+      ['Deploying the app', false],
+    ])
+    doc = applyReply(emptyDoc('s1'), parseReply('→ You Deploy: staging'))
+    expect(state(applyReply(doc, parseReply('✔ You Deploy')))).toEqual([['Deploy: staging', true]])
+  })
+
+  test('a close wins over a re-list in the same reply', () => {
+    expect(state(applyReply(emptyDoc('s1'), parseReply('→ You X\n✔ You X')))).toEqual([['X', true]])
+    const open = applyReply(emptyDoc('s1'), parseReply('→ You X'))
+    expect(state(applyReply(open, parseReply('→ You X\n✔ You X')))).toEqual([['X', true]])
+    const done = toggle(open, open.items[0]!.id)
+    expect(state(applyReply(done, parseReply('→ You X\n✔ You X')))).toEqual([['X', true]])
+    expect(state(applyReply(done, parseReply('→ You X')))).toEqual([['X', false]])
+  })
+
+  test('ticked lists only what the reply closed', () => {
+    const doc = applyReply(start(), parseReply('✔ You Run the migration\n✔ You Nothing here'))
+    expect(ticked(doc)).toEqual(['Run the migration'])
+    expect(ticked(applyReply(start(), parseReply('✔ You Nothing here')))).toEqual([])
   })
 
   test('a ✔ You line for an item the user already ticked leaves it ticked and then gone', () => {

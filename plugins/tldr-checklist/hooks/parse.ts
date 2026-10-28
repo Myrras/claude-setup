@@ -98,8 +98,8 @@ export function emptyDoc(sessionId: string): Doc {
 export function applyReply(doc: Doc, reply: Reply): Doc {
   const turn = doc.turn + 1
   // Ticked items go away with the next reply; a reply that lists one again re-adds it as open.
-  // A `✔ You` line ticks an open item, which then stays until the reply after.
-  const kept = doc.items.filter(item => !item.done).map(item => (closes(reply.closed, item, doc.items) ? { ...item, done: true } : item))
+  // A `✔ You` line then ticks an item, one the same reply lists included; it stays until the reply after.
+  const kept = doc.items.filter(item => !item.done)
   const seen = new Set(kept.map(item => normalize(item.text)))
   const added: Item[] = []
   for (const text of reply.you) {
@@ -108,18 +108,28 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     seen.add(key)
     added.push({ id: idOf(key), text, done: false, firstSeenTurn: turn })
   }
-  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items: [...kept, ...added] }
+  const open = [...kept, ...added]
+  const all = new Set([...doc.items, ...open].map(item => normalize(item.text)))
+  const items = open.map(item => (closes(reply.closed, item, open, all) ? { ...item, done: true } : item))
+  return { ...doc, turn, tldr: reply.tldr ?? doc.tldr, items }
 }
 
-// `✔ You <text>` closes the open item with that text, or the one open item whose first words it is.
-function closes(closed: string[], item: Item, items: Item[]): boolean {
+// Texts of the items the reply ticked.
+export function ticked(after: Doc): string[] {
+  return after.items.filter(item => item.done).map(item => item.text)
+}
+
+// `✔ You <text>` closes the item with that text, or the one open item whose first words it is.
+// Text that equals any item never prefix-matches another; a prefix ends at a non-letter, non-digit.
+function closes(closed: string[], item: Item, open: Item[], all: Set<string>): boolean {
   const key = normalize(item.text)
-  const open = items.filter(other => !other.done).map(other => normalize(other.text))
+  const keys = open.map(other => normalize(other.text))
   return closed.some(text => {
     const want = normalize(text)
     if (want === key) return true
-    const starts = (other: string) => other.startsWith(`${want} `)
-    return !open.includes(want) && starts(key) && open.filter(starts).length === 1
+    if (all.has(want)) return false
+    const starts = (other: string) => other.startsWith(want) && !/[\p{L}\p{N}]/u.test(other[want.length] ?? ' ')
+    return starts(key) && keys.filter(starts).length === 1
   })
 }
 

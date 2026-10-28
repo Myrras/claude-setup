@@ -24,13 +24,13 @@ The TL;DR and checklist come straight from the reply text, with no model call:
 
 - The first `TL;DR` line is the TL;DR. If a reply has none, the previous one stays.
 - Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine.
-- A `✔ You <item>` line ticks the open item with that text, as if you clicked it. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging`, not `Deploying the app`); an ambiguous one ticks nothing. `✔ Done` and `✔ Checked` never tick anything.
+- A `✔ You <item>` line ticks the open item with that text, as if you clicked it. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word, and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins. `✔ Done` and `✔ Checked` never tick anything.
 - Lines inside code fences are skipped.
 - Repeats are matched with case and whitespace ignored.
 
 ## Checklist state per prompt
 
-With each prompt you send, Claude also gets the checklist as it stands: the open items and the ones ticked off. It is told not to repeat them unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <item>`. With an empty checklist nothing is sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries) and headless runs get no state.
+With each prompt you send, Claude also gets the checklist as it stands: the open items and the ones ticked off. It is told not to repeat them unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <item>`. With an empty checklist nothing is sent. Prompts you did not type (task notifications, peer messages, scheduled triggers, queued deliveries), prompts sent while Claude is still working, and headless runs get no state.
 
 The reply format is added to every conversation, subagents too, as the API offers no way to limit it to the main one. It says to follow another format as a subagent or when one is asked.
 
