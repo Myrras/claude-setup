@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
@@ -296,6 +296,7 @@ export const register: Register = (on, options) => {
               key={'reply-' + item.id}
               placeholder="reply…"
               value={item.reply ?? ''}
+              rows={replyRows(item.reply ?? '')}
               onInput={(v: string) => {
                 update($, doc, d => setReply(d, item.id, v)).catch(error => $.ui.log(`tldr-checklist: could not keep the reply (${String(error)})`))
               }}

@@ -2,7 +2,7 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -1019,6 +1019,10 @@ test('the pane has a reply field per item and a Check checklist button', async (
   await ui.input({ key, text: 'approve', kind: 'change' })
   expect(saved()?.items.map(i => i.reply)).toEqual([undefined, undefined])
   expect((await ui.findAll({ type: 'Input' }))[1]?.props.value).toBe('approve')
+  expect((await ui.findAll({ type: 'Input' }))[1]?.props.rows).toBe(1)
+  await ui.input({ key, text: 'x'.repeat(100), kind: 'change' })
+  expect((await ui.findAll({ type: 'Input' }))[1]?.props.rows).toBe(3)
+  await ui.input({ key, text: 'approve', kind: 'change' })
   await ui.input({ key, text: 'approved' })
   expect(saved()?.items.map(i => i.reply)).toEqual([undefined, 'approved'])
 
@@ -1274,4 +1278,37 @@ test('a ✖ You line in the reply removes the item', async ($, on) => {
   await $.turn.complete(turn('TL;DR another fix first\n✖ You 1-1\n✖ Done 1-2', 't2'))
   await clock.settle()
   expect(saved()?.items.map(i => i.ref)).toEqual(['1-2'])
+})
+
+test('replyRows: a row per 40 characters and per line, 1 to 6', () => {
+  expect(replyRows('')).toBe(1)
+  expect(replyRows('x'.repeat(40))).toBe(1)
+  expect(replyRows('x'.repeat(41))).toBe(2)
+  expect(replyRows('a\n\nb')).toBe(3)
+  expect(replyRows('x'.repeat(30) + '\n' + 'y'.repeat(50))).toBe(3)
+  expect(replyRows('x'.repeat(1000))).toBe(6)
+})
+
+describe('multi-line → You items', () => {
+  test('indented and bullet lines after a → You line join its text', () => {
+    expect(parseReply('→ You  Two choices:\n  - A: do x\n  - B: do y').you).toEqual(['Two choices: A: do x B: do y'])
+    expect(parseReply('→ You Pick:\n- A: x\n2. B: y').you).toEqual(['Pick: A: x B: y'])
+    expect(parseReply('→ You Pick:\n    A: x').you).toEqual(['Pick: A: x'])
+  })
+
+  test('a blank line, a tag line or an unindented plain line ends it', () => {
+    expect(parseReply('→ You Pick:\n\n  - A: x').you).toEqual(['Pick:'])
+    expect(parseReply('→ You Pick:\nplain text\n  - A: x').you).toEqual(['Pick:'])
+    expect(parseReply('→ You Pick:\n! Note risk\n  - A: x')).toMatchObject({ you: ['Pick:'], notes: ['risk'] })
+    expect(parseReply('→ You One\n  - A\n→ You Two\n  - B').you).toEqual(['One A', 'Two B'])
+    expect(parseReply('→ You Pick:\n  ✔ Done x\n  - A').you).toEqual(['Pick:'])
+  })
+
+  test('a fenced block is not absorbed', () => {
+    expect(parseReply('→ You Pick:\n```\n  - A: x\n```\n  - B: y').you).toEqual(['Pick:'])
+  })
+
+  test('the joined text is capped', () => {
+    expect(parseReply('→ You Pick:\n  - ' + 'x'.repeat(500)).you[0]).toHaveLength(300)
+  })
 })

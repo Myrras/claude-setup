@@ -27,6 +27,20 @@ const VALID_REF = /^\d+-\d+$/
 // Most open items sent with a prompt; the pane warns from this many on.
 export const OPEN_CAP = 10
 
+// A tag line of any kind (also `✔ Done`, `✔ Checked`); it ends the continuation of a → You item.
+const ANY_TAG = /^(?:\*\*|__|\*|_)?(?:TL;DR|→|[✔✓✅☑✖✗❌]|!\s*Note)/i
+// Longest → You item text once continuation lines are joined to it.
+const ITEM_MAX = 300
+
+// Reply field height: one row per CHARS_PER_ROW characters of each line, 1..MAX_ROWS.
+export const CHARS_PER_ROW = 40
+export const MAX_ROWS = 6
+
+export function replyRows(text: string): number {
+  const rows = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / CHARS_PER_ROW)), 0)
+  return Math.min(MAX_ROWS, Math.max(1, rows))
+}
+
 export function normalize(text: string): string {
   return tidy(text).toLowerCase()
 }
@@ -34,6 +48,8 @@ export function normalize(text: string): string {
 export function parseReply(answer: string): Reply {
   const reply: Reply = { you: [], notes: [], closed: [], removed: [] }
   let fence: string | undefined
+  // The last → You item while the lines right after it may still continue it.
+  let open = false
   for (const raw of answer.split('\n')) {
     const line = raw.replace(BULLET, '')
     let marks = FENCE.exec(line)
@@ -41,7 +57,10 @@ export function parseReply(answer: string): Reply {
     if (marks && marks[1]![0] === '`' && marks[2]!.includes('`')) marks = null
     if (fence === undefined) {
       if (marks) fence = marks[1]
-      if (marks) continue
+      if (marks) {
+        open = false
+        continue
+      }
     } else {
       // CommonMark: only the same character, at least as long, nothing after it closes the fence.
       if (marks && marks[1]![0] === fence[0] && marks[1]!.length >= fence.length && !marks[2]!.trim()) fence = undefined
@@ -51,6 +70,12 @@ export function parseReply(answer: string): Reply {
     if (tldr && reply.tldr === undefined) reply.tldr = tldr
     const you = grab(YOU, line)
     if (you) reply.you.push(you)
+    else if (open && !ANY_TAG.test(line) && line.trim() && (/^\s/.test(raw) || line !== raw)) {
+      // An indented or bullet line right after a → You line: its options.
+      reply.you[reply.you.length - 1] = clip(`${reply.you.at(-1)} ${tidy(line)}`, ITEM_MAX)
+      continue
+    }
+    open = Boolean(you)
     const note = grab(NOTE, line)
     if (note) reply.notes.push(note)
     const closed = grab(CLOSE, line)
@@ -82,7 +107,7 @@ TL;DR  one line: the outcome
 ! Note  risks
 
 - Start with the TL;DR line. A trivial answer is just that line.
-- Use → You only for what the user must do or decide, not what you can do yourself. One line each.
+- Use → You only for what the user must do or decide, not what you can do yourself. One line each, options inline (A: … / B: …), never on following lines.
 - Optional: ✔ Done, ✔ Checked, ! Note; leave out empty ones.
 - One line per item. No filler, no recap.
 - Keep the → You checklist current while you work, with the checklist tool: remove items that no longer apply (e.g. "merge the PR" when the user asks for another fix first) and add them again once they apply.

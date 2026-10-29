@@ -25,7 +25,7 @@ TL;DR  one line: the outcome
 The TL;DR and checklist come straight from the reply text, with no model call:
 
 - The first `TL;DR` line is the TL;DR. If a reply has none, the previous one stays.
-- Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine.
+- Each `→ You` line is one item. Several spaces or a colon after the tag and a leading `-`/`*` bullet are fine. Indented or bullet lines right after a `→ You` line (its options) are joined to that item; a blank line, a tag line or a plain line ends it.
 - A `✔ You <number>` line ticks the open item with that number (`✔ You 2-3`, `✔ You 2-3 Run the migration`, `✔ You 2-1, 2-3`). Numbers may be separated by commas, spaces, `and` or `&`, may start with `#` and may use an en dash (`#2–3`). A number that matches no open item ticks nothing, and the text after it is not matched; numbers that match no item at all are read as text. A `→ You` line that starts with the number of an existing item is that item, not a new one.
 - A `✔ You <item>` line without a leading number ticks the open item with that text. A unique start of the text, in whole words, is enough (`Deploy` ticks `Deploy to staging` or `Deploy: staging`, not `Deploying the app`); punctuation ends a word (but `-` and `'` do not: `Re` does not tick `Re-run the job`), and a text that equals an item never matches another. An ambiguous start ticks nothing. A close in the same reply as a re-list wins.
 - `✓`, `✅` and `☑` work like `✔`. `✔ Done` and `✔ Checked` (with any of them) never tick anything.
