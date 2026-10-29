@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
 import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
-import type { Reply, ToolInput } from './parse'
+import type { Reply, Skipped, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
 const TITLE = 'TL;DR'
@@ -249,7 +249,12 @@ export const register: Register = (on, options) => {
       const reply = parseReply(e.answer)
       const prompt = await read($, lastPrompt)
       const { sessionId } = await current($)
-      const updated = await change($, value => applyReply(value, reply))
+      const skipped: Skipped[] = []
+      const updated = await change($, value => {
+        skipped.length = 0
+        return applyReply(value, reply, skipped)
+      })
+      for (const s of skipped) $.ui.log(`tldr-checklist: skipped duplicate "${s.text}" of open item "${s.of}"`)
       // Only the closes that ticked something count.
       const closed = ticked(updated)
       if (!reply.tldr && !reply.you.length && !reply.notes.length && !closed.length) return done

@@ -173,7 +173,35 @@ function compareRefs(a: string, b: string): number {
   return at - bt || an - bn
 }
 
-export function applyReply(doc: Doc, reply: Reply): Doc {
+// Lowercase words without punctuation, for comparing items that are worded differently.
+function words(text: string): string[] {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean)
+}
+
+const SIMILAR = 0.6
+const CONTAINED = 0.8
+
+// Same item: equal words, one contained in the other (as a word run), or enough shared words
+// (Jaccard, or most of the shorter text found in the longer one).
+export function isDuplicate(a: string, b: string): boolean {
+  const x = words(a)
+  const y = words(b)
+  if (!x.length || !y.length) return false
+  const [p, q] = [x.join(' '), y.join(' ')]
+  if (p === q || ` ${p} `.includes(` ${q} `) || ` ${q} `.includes(` ${p} `)) return true
+  const sx = new Set(x)
+  const sy = new Set(y)
+  let shared = 0
+  for (const w of sx) if (sy.has(w)) shared++
+  const small = Math.min(sx.size, sy.size)
+  return shared / (sx.size + sy.size - shared) >= SIMILAR || (small >= 4 && shared / small >= CONTAINED)
+}
+
+export type Skipped = { text: string; of: string }
+
+// Texts that repeat an open item (exact or reworded) are skipped; `skipped` (if given) gets each one
+// with the open item's text. A ticked item does not block: a reply that lists it again re-adds it as open.
+export function applyReply(doc: Doc, reply: Reply, skipped?: Skipped[]): Doc {
   const turn = doc.turn + 1
   // `✖ You <number>` withdraws an item first, so the same reply may list its text again as a new item.
   const gone = new Set(reply.removed.flatMap(refsIn))
@@ -195,7 +223,13 @@ export function applyReply(doc: Doc, reply: Reply): Doc {
     if (known && !known.done) continue
     texts.push(lead && (known || everRef.has(ref) || atMost(ref, doc.lastRef)) ? line.slice(lead[0].length) : line)
   }
-  const { added, lastRef: last } = addTexts(doc, texts, seen, turn)
+  const openNow = kept.filter(item => !item.done)
+  const fresh = texts.filter(text => {
+    const of = openNow.find(item => isDuplicate(item.text, text))
+    if (of) skipped?.push({ text, of: of.text })
+    return !of
+  })
+  const { added, lastRef: last } = addTexts(doc, fresh, seen, turn)
   const open = [...kept, ...added]
   const every = [...new Map([...remaining, ...open].map(item => [item.id, item])).values()]
   const keys = every.map(item => closeKey(item.text))

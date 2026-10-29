@@ -2,6 +2,7 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
+import type { Skipped } from './parse'
 import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
@@ -153,6 +154,45 @@ describe('applyReply', () => {
     doc = toggle(doc, doc.items[0]!.id)
     doc = applyReply(doc, parseReply('→ You run the migration'))
     expect(doc.items.map(i => [i.text, i.done, i.firstSeenTurn])).toEqual([['run the migration', false, 2]])
+  })
+
+  const add = (doc: Doc, ...you: string[]) => applyReply(doc, { you, notes: [], closed: [], removed: [] })
+
+  test('skips an exact duplicate of an open item', () => {
+    const skipped: Skipped[] = []
+    const doc = applyReply(add(emptyDoc('s1'), 'Run the migration'), { you: ['Run the migration'], notes: [], closed: [], removed: [] }, skipped)
+    expect(doc.items).toHaveLength(1)
+    expect(skipped).toEqual([{ text: 'Run the migration', of: 'Run the migration' }])
+  })
+
+  test('skips a whitespace, case and punctuation duplicate', () => {
+    const doc = add(add(emptyDoc('s1'), 'Run the migration'), '  run   THE migration! ')
+    expect(doc.items).toHaveLength(1)
+  })
+
+  test('skips a reworded duplicate', () => {
+    const a = 'Say go to start slice 0 (contract), and whether I work in an isolated worktree'
+    const b =
+      'Say go to start slice 0 (the contract: item model, states, migration shape). Also say whether I should work in an isolated worktree. CLAUDE.md requires a branch and PR, never straight to main.'
+    const skipped: Skipped[] = []
+    const doc = applyReply(add(emptyDoc('s1'), a), { you: [b], notes: [], closed: [], removed: [] }, skipped)
+    expect(doc.items.map(i => i.text)).toEqual([a])
+    expect(skipped).toEqual([{ text: b, of: a }])
+  })
+
+  test('adds a genuinely different item', () => {
+    const doc = add(add(emptyDoc('s1'), 'Run the migration'), 'Deploy to staging')
+    expect(doc.items.map(i => i.text)).toEqual(['Run the migration', 'Deploy to staging'])
+  })
+
+  test('a ticked item does not block a reworded item, and a repeat re-adds it as open', () => {
+    let doc = add(emptyDoc('s1'), 'Run the migration')
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = add(doc, 'Run the migration', 'Run the migration on staging, then check the logs')
+    expect(doc.items.map(i => [i.text, i.done])).toEqual([
+      ['Run the migration', false],
+      ['Run the migration on staging, then check the logs', false],
+    ])
   })
 
   test('a reply without TL;DR keeps the previous one', () => {
