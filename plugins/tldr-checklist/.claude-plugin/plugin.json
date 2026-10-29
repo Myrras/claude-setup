@@ -1,6 +1,6 @@
 {
   "name": "tldr-checklist",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Teaches a TL;DR / → You reply format and keeps a side pane with the latest TL;DR, the session's goal, next step and blockers, and a persistent checklist of every → You line",
   "author": {
     "name": "RobbieMinderhoud"

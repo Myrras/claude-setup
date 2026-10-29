@@ -2,7 +2,7 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, applyTool, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -735,7 +735,11 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('prompt.context', (_, e) => ({ blocks: e.blocks }))
-  on('prompt.submit', (_, e) => (dropping ? { drop: 'no' } : { text: e.text, context: e.context }))
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+    return dropping ? { drop: 'no' } : { text: e.text, context: e.context }
+  })
   on('session.compact', (_, e) => ({ messages: e.messages }))
   const saved = () => JSON.parse(files.get(FILE) ?? 'null') as Doc | null
   const setId = (next: string) => {
@@ -747,7 +751,7 @@ function world(on: On, status: string | undefined, startUnreadable = false, brok
   const setDropping = (value: boolean) => {
     dropping = value
   }
-  return { files, clock, saved, setId, setUnreadable, setDropping, tools, writes: () => writes }
+  return { files, clock, saved, submitted, setId, setUnreadable, setDropping, tools, writes: () => writes }
 }
 
 const turn = (answer: string, turnId: string) =>
@@ -782,7 +786,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     ])
 
     ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.findAll({ type: 'Button' })).toHaveLength(3)
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(4)
     expect(await ui.find({ type: 'Text', text: /\[x\]/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Fixed the review comments/ })).toBeDefined()
     await ui.unmount()
@@ -1001,6 +1005,84 @@ test('with inject off, neither the format nor the checklist is sent', { options:
 
 const many = (count: number) => Array.from({ length: count }, (_, i) => `→ You Item ${i + 1}`).join('\n')
 
+test('the pane has a reply field per item and a Check checklist button', async ($, on) => {
+  const { clock, saved, submitted } = world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const inputs = await ui.findAll({ type: 'Input' })
+  expect(inputs).toHaveLength(2)
+  const key = inputs[1]!.key!
+  // Typing only keeps the text in memory; Enter saves it.
+  await ui.input({ key, text: 'approve', kind: 'change' })
+  expect(saved()?.items.map(i => i.reply)).toEqual([undefined, undefined])
+  expect((await ui.findAll({ type: 'Input' }))[1]?.props.value).toBe('approve')
+  await ui.input({ key, text: 'approved' })
+  expect(saved()?.items.map(i => i.reply)).toEqual([undefined, 'approved'])
+
+  const buttons = await ui.findAll({ type: 'Button' })
+  await ui.press({ key: 'check' })
+  expect(buttons.at(-1)?.key).toBe('check')
+  expect(submitted.at(-1)).toContain('[ ] 1-2 Review the PR\n  Reply: approved')
+  await ui.unmount()
+
+  const mobile = await $.ui.mount({ ...PANE, surface: 'mobile' })
+  expect(await mobile.findAll({ type: 'Input' })).toHaveLength(0)
+  expect(await mobile.find({ type: 'Text', text: /\[ \] 1-2 Review the PR/ })).toBeDefined()
+  await mobile.unmount()
+})
+
+describe('reply field', () => {
+  test('new items have no reply and setReply sets one', () => {
+    const doc = applyReply(emptyDoc('s1'), parseReply(REPLY_1))
+    expect(doc.items.map(i => i.reply)).toEqual([undefined, undefined])
+    const next = setReply(doc, doc.items[1]!.id, 'looks good')
+    expect(next.items.map(i => i.reply)).toEqual([undefined, 'looks good'])
+  })
+
+  test('a reply survives a tick, a later reply and a reload', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply(REPLY_1))
+    doc = setReply(doc, doc.items[0]!.id, 'try staging first')
+    doc = toggle(toggle(doc, doc.items[0]!.id), doc.items[0]!.id)
+    doc = applyReply(doc, parseReply('TL;DR more\n→ You Something else'))
+    expect(doc.items[0]?.reply).toBe('try staging first')
+    expect(parseDoc(JSON.stringify(doc), 's1')?.items[0]?.reply).toBe('try staging first')
+  })
+
+  test('old state without a reply loads, and a reply of the wrong type is dropped', () => {
+    const old = JSON.stringify({ ...emptyDoc('s1'), items: [{ id: 'a', text: 'Run it', done: false, firstSeenTurn: 1 }, { id: 'b', text: 'Ship it', done: false, firstSeenTurn: 1, reply: 5 }] })
+    const items = parseDoc(old, 's1')?.items
+    expect(items?.map(i => i.text)).toEqual(['Run it', 'Ship it'])
+    expect(items?.map(i => i.reply)).toEqual([undefined, undefined])
+  })
+
+  test('the AI sees replies in the checklist state and the tool list', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply(REPLY_1))
+    doc = setReply(doc, doc.items[1]!.id, '  approved,\n merge it ')
+    expect(panelState(doc)).toContain('- 1-2 Review the PR (your reply: approved, merge it)')
+    expect(panelState(doc)).toContain('- 1-1 Run the migration\n')
+    expect(listText(doc)).toContain('1-2 [open] Review the PR (your reply: approved, merge it)')
+    expect(panelState(setReply(doc, doc.items[1]!.id, 'x'.repeat(500)))).toContain(`(your reply: ${'x'.repeat(199)}…)`)
+  })
+
+  test('checkPrompt lists open items first with replies, then the instruction', () => {
+    let doc = applyReply(emptyDoc('s1'), parseReply(REPLY_1))
+    doc = toggle(doc, doc.items[0]!.id)
+    doc = setReply(doc, doc.items[1]!.id, 'approved')
+    expect(checkPrompt(doc)).toBe(
+      [
+        'TL;DR: Added the export endpoint',
+        '[ ] 1-2 Review the PR',
+        '  Reply: approved',
+        '[x] 1-1 Run the migration',
+        'Look at this checklist: act on my replies and tell me what is still open.',
+      ].join('\n'),
+    )
+  })
+})
+
 test(`the pane warns from ${OPEN_CAP} open items on`, async ($, on) => {
   const { clock } = world(on, undefined)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1013,7 +1095,7 @@ test(`the pane warns from ${OPEN_CAP} open items on`, async ($, on) => {
   await clock.settle()
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /open items — tick off/ }))?.text).toBe(`${OPEN_CAP}+ open items — tick off what you have read`)
-  expect(await ui.findAll({ type: 'Button' })).toHaveLength(OPEN_CAP)
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(OPEN_CAP + 1)
   await ui.unmount()
 })
 
@@ -1107,7 +1189,7 @@ test('the checklist tool is registered and keeps the checklist during a turn', a
   expect((await $.tool.call({ tool: TOOL, action: 'remove', ref: '1-1' })).result).toBe('The checklist is empty.')
   expect(saved()?.items).toEqual([])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(1)
   expect((await $.tool.call({ tool: TOOL, action: 'add', text: ['Merge the PR', 'Deploy'] })).result).toBe('2-1 [open] Merge the PR\n2-2 [open] Deploy')
   expect(await ui.find({ type: 'Text', text: /\[ \] 2-1 Merge the PR/ })).toBeDefined()
   expect((await $.tool.call({ tool: TOOL, action: 'close', ref: '2-2' })).result).toBe('2-1 [open] Merge the PR\n2-2 [done] Deploy')

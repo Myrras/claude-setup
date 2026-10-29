@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, applyTool, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
@@ -25,7 +25,7 @@ const TOOL_SPEC = {
   isDeferred: false,
 }
 
-// Change the tag when Doc's fields change (a new optional field needs none): an older value then reads as empty.
+// Change the tag when Doc's fields change (a new optional field needs none, as `reply`): an older value then reads as empty.
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-2' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
 const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
@@ -269,7 +269,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const table = $.ui.resolve(e)
+    const { Box, Button, Text } = table
+    // The mobile app draws no field yet: there the rows have no reply.
+    const Input = 'Input' in table ? table.Input : undefined
     const value = await read($, doc)
     const open = value.items.filter(item => !item.done).length
     const line = (label: string, text: string) => (
@@ -278,14 +281,41 @@ export const register: Register = (on, options) => {
         {text ? text : <Text dimColor>-</Text>}
       </Text>
     )
+    // Typing only writes the atom, so a redraw keeps the text; Enter saves it.
     const row = (item: Item) => (
-      <Button key={item.id} plain onPress={() => change($, d => toggle(d, item.id))}>
-        <Text dimColor={item.done} strikethrough={item.done}>
-          {item.done ? '[x] ' : '[ ] '}
-          {item.ref} {item.text}
-        </Text>
-      </Button>
+      <Box key={'row-' + item.id} flexDirection="column">
+        <Button key={item.id} plain onPress={() => change($, d => toggle(d, item.id))}>
+          <Text dimColor={item.done} strikethrough={item.done}>
+            {item.done ? '[x] ' : '[ ] '}
+            {item.ref} {item.text}
+          </Text>
+        </Button>
+        {Input && (
+          <Box marginLeft={4}>
+            <Input
+              key={'reply-' + item.id}
+              placeholder="reply…"
+              value={item.reply ?? ''}
+              onInput={(v: string) => {
+                update($, doc, d => setReply(d, item.id, v)).catch(error => $.ui.log(`tldr-checklist: could not keep the reply (${String(error)})`))
+              }}
+              onSubmit={(v: string) => {
+                change($, d => setReply(d, item.id, v)).catch(error => $.ui.log(`tldr-checklist: could not save the reply (${String(error)})`))
+              }}
+            />
+          </Box>
+        )}
+      </Box>
     )
+    // Saves what is typed, then sends the checklist with the replies to the AI.
+    const check = async () => {
+      try {
+        const latest = await change($, d => d)
+        await $.prompt.submit({ text: checkPrompt(latest) })
+      } catch (error) {
+        $.ui.log(`tldr-checklist: could not send the checklist (${String(error)})`)
+      }
+    }
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -310,6 +340,9 @@ export const register: Register = (on, options) => {
           )}
           {value.items.map(row)}
         </Box>
+        <Button key="check" onPress={check}>
+          <Text>Check checklist</Text>
+        </Button>
       </Box>
     )
   })
