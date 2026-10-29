@@ -32,12 +32,19 @@ const ANY_TAG = /^(?:\*\*|__|\*|_)?(?:TL;DR|→|[✔✓✅☑✖✗❌]|!\s*Note
 // Longest → You item text once continuation lines are joined to it.
 const ITEM_MAX = 300
 
-// Reply field height: one row per CHARS_PER_ROW characters of each line, 1..MAX_ROWS.
-export const CHARS_PER_ROW = 40
+// Reply field height: one row per `width` characters of each line, 1..MAX_ROWS.
+// The width is the pane's columns minus the layout around the field.
+export const DEFAULT_WIDTH = 40
 export const MAX_ROWS = 6
+const MIN_WIDTH = 10
+const OVERHEAD = 6
 
-export function replyRows(text: string): number {
-  const rows = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / CHARS_PER_ROW)), 0)
+export function replyWidth(columns?: number): number {
+  return columns === undefined ? DEFAULT_WIDTH : Math.max(MIN_WIDTH, Math.floor(columns) - OVERHEAD)
+}
+
+export function replyRows(text: string, width: number = DEFAULT_WIDTH): number {
+  const rows = text.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / width)), 0)
   return Math.min(MAX_ROWS, Math.max(1, rows))
 }
 

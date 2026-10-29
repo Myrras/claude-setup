@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
-import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, replyWidth, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
@@ -271,6 +271,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Text } = table
     // The mobile app draws no field yet: there the rows have no reply.
     const Input = 'Input' in table ? table.Input : undefined
+    const width = replyWidth(e.viewport?.columns)
     const value = await read($, doc)
     const open = value.items.filter(item => !item.done).length
     const line = (label: string, text: string) => (
@@ -294,7 +295,7 @@ export const register: Register = (on, options) => {
               key={'reply-' + item.id}
               placeholder="reply…"
               value={item.reply ?? ''}
-              rows={replyRows(item.reply ?? '')}
+              rows={replyRows(item.reply ?? '', width)}
               onInput={(v: string) => {
                 update($, doc, d => setReply(d, item.id, v)).catch(error => $.ui.log(`tldr-checklist: could not keep the reply (${String(error)})`))
               }}

@@ -2,7 +2,7 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
+import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, replyRows, replyWidth, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -1288,13 +1288,38 @@ test('a ✖ You line in the reply removes the item', async ($, on) => {
   expect(saved()?.items.map(i => i.ref)).toEqual(['1-2'])
 })
 
-test('replyRows: a row per 40 characters and per line, 1 to 6', () => {
+test('replyRows: a row per width characters and per line, 1 to 6', () => {
   expect(replyRows('')).toBe(1)
   expect(replyRows('x'.repeat(40))).toBe(1)
   expect(replyRows('x'.repeat(41))).toBe(2)
-  expect(replyRows('a\n\nb')).toBe(3)
-  expect(replyRows('x'.repeat(30) + '\n' + 'y'.repeat(50))).toBe(3)
-  expect(replyRows('x'.repeat(1000))).toBe(6)
+  expect(replyRows('x'.repeat(41), 80)).toBe(1)
+  expect(replyRows('a\n\nb', 20)).toBe(3)
+  expect(replyRows('x'.repeat(30) + '\n' + 'y'.repeat(50), 40)).toBe(3)
+  expect(replyRows('x'.repeat(1000), 20)).toBe(6)
+})
+
+test('the reply field height follows the pane width', async ($, on) => {
+  world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete(turn(REPLY_1, 't1'))
+
+  const rows = async (columns?: number) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', ...(columns ? { viewport: { columns, rows: 40, isFullscreen: true } } : {}) })
+    const key = (await ui.findAll({ type: 'Input' }))[1]!.key!
+    await ui.input({ key, text: 'x'.repeat(100), kind: 'change' })
+    const result = (await ui.findAll({ type: 'Input' }))[1]?.props.rows
+    await ui.unmount()
+    return result
+  }
+  expect(await rows(30)).toBe(5)
+  expect(await rows(200)).toBe(1)
+  expect(await rows()).toBe(3)
+})
+
+test('replyWidth: pane columns minus the layout, floored, 40 without a viewport', () => {
+  expect(replyWidth(undefined)).toBe(40)
+  expect(replyWidth(80)).toBe(74)
+  expect(replyWidth(12)).toBe(10)
 })
 
 describe('multi-line → You items', () => {
