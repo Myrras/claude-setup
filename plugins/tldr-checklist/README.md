@@ -4,7 +4,7 @@ A Claude Code mod that teaches Claude a short reply format and keeps a side pane
 
 - **TL;DR**: the one-line outcome of the latest reply.
 - **Goal, Next, Blockers**: three short lines for the session, written by one small model call (haiku) per turn. If that call fails, the previous values stay.
-- **→ You**: every `→ You` line from the replies becomes a checklist item. Click it, or focus it and press Enter, to tick or untick it. Ticked items stay in the list, dimmed and struck through, until the next reply. Items keep their state across turns, pane reopens and `--resume`. When a line repeats, it is not added again. From 10 open items on, the pane shows a warning to tick off what you have read.
+- **→ You**: every `→ You` line from the replies becomes a checklist item. Click it, or focus it and press Enter, to tick or untick it. Ticked items stay in the list, dimmed and struck through, until the next reply. Items keep their state across turns, pane reopens and `--resume`. When a line repeats, it is not added again. From 10 open items on, the pane shows a warning to tick off what you have read. Each item has a reply field under it: type your answer and press Enter to save it (not on the mobile app, which has no field yet).
 
 Each item gets a number `<reply>-<n>`: the reply that added it and its place among the items that reply added (`[ ] 2-3 Run the migration`). Numbers never change and are never reused; an item that was dropped and listed again gets a new one.
 
@@ -46,7 +46,7 @@ Close means done; remove means withdrawn, not done. An unknown number changes no
 
 ## Checklist state per prompt
 
-With a prompt you send, Claude also gets the checklist as it stands, with item numbers: the open items, the ones you ticked and the ones its last reply closed. A tick of yours means you read the item, not that it is done: Claude may still mention it if it needs doing, but does not list it again unless it changed. It is told not to repeat items unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <number>`. With an empty checklist nothing is sent.
+With a prompt you send, Claude also gets the checklist as it stands, with item numbers: the open items, the ones you ticked and the ones its last reply closed. An item with a reply carries it, shortened to 200 characters (`- 2-1 Run the migration (your reply: use staging)`); the `checklist` tool's `list` shows it too. A tick of yours means you read the item, not that it is done: Claude may still mention it if it needs doing, but does not list it again unless it changed. It is told not to repeat items unless they changed, not to list what it can do itself or what is done, and to keep items short. When items are open, it is also told about `✔ You <number>`. With an empty checklist nothing is sent.
 
 At most the 10 newest open items are sent; with more, Claude is told how many older ones were left out and to ask you to tick off what is done or close one by its text. The pane keeps them all.
 
@@ -79,7 +79,7 @@ claude plugin install tldr-checklist@robbieminderhoud
 
 ## Usage
 
-The pane opens by itself at session start when the terminal is wide enough (144 columns or more). `/tldr` opens it at any width and reopens it after you close it. In the fullscreen terminal, a click ticks an item. From the keyboard, focus the pane (ctrl+x tab), move with Tab or the arrow keys and press Enter.
+The pane opens by itself at session start when the terminal is wide enough (144 columns or more). `/tldr` opens it at any width and reopens it after you close it. In the fullscreen terminal, a click ticks an item. From the keyboard, focus the pane (ctrl+x tab), move with Tab or the arrow keys and press Enter. The **Check checklist** button at the bottom sends the TL;DR, the items and your replies to Claude as a prompt.
 
 ## State
 
@@ -89,7 +89,7 @@ There is one JSON file per session:
 $CLAUDE_CONFIG_DIR/tldr-checklist/sessions/<session-id>.json
 ```
 
-If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, lastRef, items: [{ id, text, done, firstSeenTurn, ref, tickedBy, closedTurn }] }`; `tickedBy` is `user` or `reply` on a ticked item, `closedTurn` the turn whose tool call closed it, and `lastRef` the last number handed out, so a removed item's number is not given again. A file from before item numbers loads with numbers derived from `firstSeenTurn` and the order of the items. The file is written after every turn, every tick and every checklist tool call. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
+If `CLAUDE_CONFIG_DIR` is not set, the file goes in `~/.claude/tldr-checklist/sessions/`. It holds `{ sessionId, turn, tldr, goal, next, blockers, lastRef, items: [{ id, text, done, firstSeenTurn, ref, tickedBy, closedTurn, reply }] }`; `reply` is the text you typed under an item (missing when empty; older files load without it), `tickedBy` is `user` or `reply` on a ticked item, `closedTurn` the turn whose tool call closed it, and `lastRef` the last number handed out, so a removed item's number is not given again. A file from before item numbers loads with numbers derived from `firstSeenTurn` and the order of the items. The file is written after every turn, every tick and every checklist tool call. It is read at session start and when the session id changes (`/clear`, `/resume`); `/tldr` only opens the pane. A file that is not valid JSON is copied to `<session-id>.json.corrupt` and replaced by a fresh one; a file that cannot be read is left alone.
 
 ## Develop
 

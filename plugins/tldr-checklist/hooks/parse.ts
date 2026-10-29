@@ -96,7 +96,7 @@ export function panelState(doc: Doc): string | undefined {
   const shown = open.slice(-OPEN_CAP)
   const read = doc.items.filter(item => item.done && item.tickedBy !== 'reply')
   const closed = doc.items.filter(item => item.done && item.tickedBy === 'reply')
-  const list = (items: Item[]) => items.map(item => `- ${item.ref} ${item.text}`).join('\n')
+  const list = (items: Item[]) => items.map(item => `- ${item.ref} ${item.text}${withReply(item)}`).join('\n')
   const parts = ['The → You checklist in the side panel:']
   if (shown.length) parts.push(`Open:\n${list(shown)}`)
   const hidden = open.length - shown.length
@@ -112,6 +112,14 @@ export function panelState(doc: Doc): string | undefined {
   if (read.length) rules.push('A user tick means read, not done: mention such an item only if it still needs doing.')
   parts.push(rules.join('\n'))
   return parts.join('\n\n')
+}
+
+// The user's typed reply to an item, short, for the lines the AI reads.
+const REPLY_MAX = 200
+
+function withReply(item: Item): string {
+  const reply = clip(tidy(item.reply ?? ''), REPLY_MAX)
+  return reply ? ` (your reply: ${reply})` : ''
 }
 
 function refTurn(ref: string): number {
@@ -235,9 +243,28 @@ export function listText(doc: Doc): string {
   if (!doc.items.length) return 'The checklist is empty.'
   const state = (item: Item) => (!item.done ? 'open' : item.tickedBy === 'reply' ? 'done' : 'read')
   const items = [...doc.items].sort((a, b) => Number(a.done) - Number(b.done) || byRef(a, b))
-  const lines = items.map(item => `${item.ref} [${state(item)}] ${item.text}`)
+  const lines = items.map(item => `${item.ref} [${state(item)}] ${item.text}${withReply(item)}`)
   if (items.some(item => state(item) === 'read')) lines.push('read = ticked by the user, not necessarily done.')
   return lines.join('\n')
+}
+
+// The user typed this under an item; only the text changes, so ticks and numbers stay.
+export function setReply(doc: Doc, id: string, text: string): Doc {
+  return { ...doc, items: doc.items.map(item => (item.id === id ? { ...item, reply: text } : item)) }
+}
+
+// The text the Check checklist button sends: TL;DR, open items first with their replies, then one instruction.
+export function checkPrompt(doc: Doc): string {
+  const items = [...doc.items].sort((a, b) => Number(a.done) - Number(b.done) || byRef(a, b))
+  const lines = items.map(item => {
+    const reply = tidy(item.reply ?? '')
+    return `${item.done ? '[x]' : '[ ]'} ${item.ref} ${item.text}${reply ? `\n  Reply: ${reply}` : ''}`
+  })
+  return [
+    `TL;DR: ${doc.tldr || '-'}`,
+    ...(lines.length ? lines : ['(the checklist is empty)']),
+    'Look at this checklist: act on my replies and tell me what is still open.',
+  ].join('\n')
 }
 
 // Texts of the items the reply ticked.
@@ -365,8 +392,8 @@ function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-// State from before item numbers has no `ref` or `tickedBy`.
-type Stored = Omit<Item, 'ref'> & { ref?: unknown }
+// State from before item numbers has no `ref` or `tickedBy`; from before replies, no `reply`.
+type Stored = Omit<Item, 'ref' | 'reply'> & { ref?: unknown; reply?: unknown }
 
 function isItem(value: unknown): value is Stored {
   const item = value as Stored
@@ -383,7 +410,9 @@ function isItem(value: unknown): value is Stored {
 }
 
 // A missing number is derived from the turn and the item's order in it, skipping the numbers taken there.
-function withRefs(items: Stored[]): Item[] {
+function withRefs(stored: Stored[]): Item[] {
+  // A reply of the wrong type starts over (no reply).
+  const items = stored.map(({ reply, ...item }) => (typeof reply === 'string' && reply ? { ...item, reply } : item))
   const valid = (ref: unknown): ref is string => typeof ref === 'string' && VALID_REF.test(ref)
   const taken = new Set(items.map(item => item.ref).filter(valid))
   const last = new Map<number, number>()
