@@ -111,6 +111,7 @@ TL;DR  one line: the outcome
 - Optional: ✔ Done, ✔ Checked, ! Note; leave out empty ones.
 - One line per item. No filler, no recap.
 - Keep the → You checklist current while you work, with the checklist tool: remove items that no longer apply (e.g. "merge the PR" when the user asks for another fix first) and add them again once they apply.
+- Before the final reply, call the checklist tool with action list and reconcile: close what is done, remove what no longer applies, keep what is open. Never write an open item again in other words; add a → You line only for a genuinely new item.
 For replies to the user only; as a subagent, or when a specific output format is asked, follow that instead.`
 
 // The checklist as the user sees it, sent with each prompt; nothing when it is empty.
@@ -133,6 +134,7 @@ export function panelState(doc: Doc): string | undefined {
     "Use → You only for what the user must do or decide: not what you can do yourself, not what is done. Keep each item short.",
   ]
   if (open.length) rules.push('When an open item is done, close it with a line: ✔ You <number>')
+  if (open.length) rules.push('Before your final reply, call the checklist tool with action list and reconcile: close what is done, remove what no longer applies, keep what is open. Never write an open item again in other words; add a → You line only for a genuinely new item.')
   if (open.length) rules.push("If the user's prompt makes an open item premature or moot, remove it now with the checklist tool; add it again when it applies again.")
   if (read.length) rules.push('A user tick means read, not done: mention such an item only if it still needs doing.')
   parts.push(rules.join('\n'))
