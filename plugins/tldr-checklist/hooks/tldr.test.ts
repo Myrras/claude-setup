@@ -2,7 +2,6 @@ import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Doc } from '../types'
-import type { Skipped } from './parse'
 import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, normalize, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
 
 const FILE = '/home/me/.claude/tldr-checklist/sessions/s1.json'
@@ -154,45 +153,6 @@ describe('applyReply', () => {
     doc = toggle(doc, doc.items[0]!.id)
     doc = applyReply(doc, parseReply('→ You run the migration'))
     expect(doc.items.map(i => [i.text, i.done, i.firstSeenTurn])).toEqual([['run the migration', false, 2]])
-  })
-
-  const add = (doc: Doc, ...you: string[]) => applyReply(doc, { you, notes: [], closed: [], removed: [] })
-
-  test('skips an exact duplicate of an open item', () => {
-    const skipped: Skipped[] = []
-    const doc = applyReply(add(emptyDoc('s1'), 'Run the migration'), { you: ['Run the migration'], notes: [], closed: [], removed: [] }, skipped)
-    expect(doc.items).toHaveLength(1)
-    expect(skipped).toEqual([{ text: 'Run the migration', of: 'Run the migration' }])
-  })
-
-  test('skips a whitespace, case and punctuation duplicate', () => {
-    const doc = add(add(emptyDoc('s1'), 'Run the migration'), '  run   THE migration! ')
-    expect(doc.items).toHaveLength(1)
-  })
-
-  test('skips a reworded duplicate', () => {
-    const a = 'Say go to start slice 0 (contract), and whether I work in an isolated worktree'
-    const b =
-      'Say go to start slice 0 (the contract: item model, states, migration shape). Also say whether I should work in an isolated worktree. CLAUDE.md requires a branch and PR, never straight to main.'
-    const skipped: Skipped[] = []
-    const doc = applyReply(add(emptyDoc('s1'), a), { you: [b], notes: [], closed: [], removed: [] }, skipped)
-    expect(doc.items.map(i => i.text)).toEqual([a])
-    expect(skipped).toEqual([{ text: b, of: a }])
-  })
-
-  test('adds a genuinely different item', () => {
-    const doc = add(add(emptyDoc('s1'), 'Run the migration'), 'Deploy to staging')
-    expect(doc.items.map(i => i.text)).toEqual(['Run the migration', 'Deploy to staging'])
-  })
-
-  test('a ticked item does not block a reworded item, and a repeat re-adds it as open', () => {
-    let doc = add(emptyDoc('s1'), 'Run the migration')
-    doc = toggle(doc, doc.items[0]!.id)
-    doc = add(doc, 'Run the migration', 'Run the migration on staging, then check the logs')
-    expect(doc.items.map(i => [i.text, i.done])).toEqual([
-      ['Run the migration', false],
-      ['Run the migration on staging, then check the logs', false],
-    ])
   })
 
   test('a reply without TL;DR keeps the previous one', () => {
@@ -1149,27 +1109,27 @@ test('old state without numbers shows derived numbers in the pane', async ($, on
   await ui.unmount()
 })
 
-test('the checklist state is sent only when it changed, and again after the context is read anew', async ($, on) => {
+test('the checklist state is sent with each prompt while an item is open, and after a compaction', async ($, on) => {
   const { clock, files, saved, setId } = world(on, undefined)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete(turn(REPLY_1, 't1'))
   await clock.settle()
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 
   // Reading the context (also done for every subagent) does not reset it; a compaction does.
   await $.prompt.context(CONTEXT)
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
   await $.session.compact({ trigger: 'auto', messages: MESSAGES })
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 
   // A user tick changes it.
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: (await ui.findAll({ type: 'Button' }))[0]!.key! })
   await ui.unmount()
   expect((await $.prompt.submit(PROMPT)).context![0]).toContain('Ticked by the user (read; not necessarily done):\n- 1-1 Run the migration')
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 
   // So does a close in a reply.
   await $.turn.complete(turn('✔ You 1-2', 't2'))
@@ -1192,7 +1152,7 @@ test('a precompute or a subagent compaction does not reset the sent state', asyn
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
   await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
   await $.session.compact({ trigger: 'auto', agentId: 'a1', messages: MESSAGES })
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 })
 
 test('a dropped prompt does not count as sent', async ($, on) => {
@@ -1206,14 +1166,22 @@ test('a dropped prompt does not count as sent', async ($, on) => {
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 })
 
-test('the state is sent again at least every 5th prompt', async ($, on) => {
+test('the state is sent with every prompt while an item is open', async ($, on) => {
   const { clock } = world(on, undefined)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete(turn(REPLY_1, 't1'))
   await clock.settle()
-  const sent: boolean[] = []
-  for (let i = 0; i < 11; i++) sent.push((await $.prompt.submit(PROMPT)).context !== undefined)
-  expect(sent).toEqual([true, false, false, false, false, true, false, false, false, false, true])
+  for (let i = 0; i < 7; i++) {
+    const result = await $.prompt.submit(PROMPT)
+    expect(result.context).toHaveLength(1)
+    expect(result.context![0]).toContain('call the checklist tool with action list and reconcile')
+  }
+})
+
+test('the format asks for a list call before the final reply', async ($, on) => {
+  world(on, undefined)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(FORMAT).toContain('Before the final reply, call the checklist tool with action list')
 })
 
 const TOOL = 'mcp__tldr-checklist__checklist'
@@ -1288,13 +1256,13 @@ test('a change through the tool is sent with the next prompt', async ($, on) => 
   await $.turn.complete(turn('→ You Merge the PR', 't1'))
   await clock.settle()
   expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
   await $.tool.call({ tool: TOOL, action: 'remove', ref: '1-1' })
   await $.tool.call({ tool: TOOL, action: 'add', text: 'Deploy' })
   const context = (await $.prompt.submit(PROMPT)).context!
   expect(context[0]).toContain('Open:\n- 2-1 Deploy')
   expect(context[0]).not.toContain('Merge the PR')
-  expect((await $.prompt.submit(PROMPT)).context).toBeUndefined()
+  expect((await $.prompt.submit(PROMPT)).context).toHaveLength(1)
 })
 
 test('with inject off, the checklist tool is not registered and a call is refused', { options: { inject: false } }, async ($, on) => {

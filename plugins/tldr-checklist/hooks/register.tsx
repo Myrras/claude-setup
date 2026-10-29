@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Doc, Item } from '../types'
 import { applyReply, applyTool, checkPrompt, emptyDoc, FORMAT, listText, mergeDocs, OPEN_CAP, panelState, parseDoc, parseReply, parseStatus, setReply, statusPrompt, ticked, toggle, withoutClosed } from './parse'
-import type { Reply, Skipped, ToolInput } from './parse'
+import type { Reply, ToolInput } from './parse'
 
 const PANE = 'tldr-checklist'
 const TITLE = 'TL;DR'
@@ -12,7 +12,7 @@ const TOOL = 'mcp__tldr-checklist__checklist'
 const TOOL_SPEC = {
   name: 'checklist',
   description:
-    'The → You checklist in the side panel. list: show it. add: add open items (text). close: mark items done (ref). remove: withdraw items that no longer apply (ref); add them again once they apply. Every action answers the list.',
+    'The → You checklist in the side panel. list: show it. add: add open items (text). close: mark items done (ref). remove: withdraw items that no longer apply (ref); add them again once they apply. Every action answers the list. Call list before the final reply to reconcile; do not re-add open items.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -29,11 +29,9 @@ const TOOL_SPEC = {
 const doc = atom({ plugin: 'tldr-checklist', key: 'doc' } as const, emptyDoc(''), { shape: 'doc-2' })
 const lastPrompt = atom({ plugin: 'tldr-checklist', key: 'prompt' } as const, '')
 const interactive = atom({ plugin: 'tldr-checklist', key: 'interactive' } as const, true)
-// The checklist state last sent, and the prompts since; a prompt sends it only when it changed or
-// RESEND_EVERY prompts passed (the API has no rewind event, and a rewind can drop the message that held it).
+// The checklist state last sent; a prompt sends it when it changed, and always while an item is open.
 // Cleared on a compaction, /clear and /resume.
-const RESEND_EVERY = 5
-const NOTHING_SENT = { sessionId: '', text: '', count: 0 }
+const NOTHING_SENT = { sessionId: '', text: '' }
 const sent = atom({ plugin: 'tldr-checklist', key: 'sent' } as const, NOTHING_SENT)
 
 async function stateFile($: EngineInterface, sessionId: string): Promise<string | undefined> {
@@ -139,20 +137,20 @@ export const register: Register = (on, options) => {
       return result
     })
 
-    // A prompt carries the checklist when it changed since the last one sent, so replies neither repeat nor miss items.
+    // A prompt carries the checklist when it changed or an item is open, so the model reconciles it instead of repeating items.
     on('prompt.submit', async ($, e, next) => {
       // Only what the user typed: not commands, meta or queued deliveries, task notifications, peers, triggers or plugin prompts.
       // Headless runs never apply `✔ You` lines, so the state would only go stale.
       const typed = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
       if (e.command || e.isMeta || e.turnId !== undefined || !typed || !(await read($, interactive))) return next(e)
       let state: string | undefined
-      let plan: { sessionId: string; text: string; send: boolean } | undefined
+      let plan: { sessionId: string; text: string } | undefined
       try {
         const value = await current($)
         const text = panelState(value) ?? ''
         const last = await read($, sent)
-        const send = last.sessionId !== value.sessionId || last.text !== text || last.count + 1 >= RESEND_EVERY
-        plan = { sessionId: value.sessionId, text, send }
+        const send = last.sessionId !== value.sessionId || last.text !== text || value.items.some(item => !item.done)
+        plan = { sessionId: value.sessionId, text }
         if (send) state = text || undefined
       } catch (error) {
         $.ui.log(`tldr-checklist: could not read the checklist (${String(error)})`)
@@ -160,8 +158,8 @@ export const register: Register = (on, options) => {
       const result = await next(state ? { ...e, context: [...(e.context ?? []), state] } : e)
       // Counted as sent only when the prompt went in.
       if (plan && !result.drop) {
-        const { sessionId, text, send } = plan
-        await update($, sent, v => (send ? { sessionId, text, count: 0 } : { ...v, count: v.count + 1 })).catch(error =>
+        const { sessionId, text } = plan
+        await update($, sent, () => ({ sessionId, text })).catch(error =>
           $.ui.log(`tldr-checklist: could not save the sent state (${String(error)})`),
         )
       }
@@ -249,12 +247,7 @@ export const register: Register = (on, options) => {
       const reply = parseReply(e.answer)
       const prompt = await read($, lastPrompt)
       const { sessionId } = await current($)
-      const skipped: Skipped[] = []
-      const updated = await change($, value => {
-        skipped.length = 0
-        return applyReply(value, reply, skipped)
-      })
-      for (const s of skipped) $.ui.log(`tldr-checklist: skipped duplicate "${s.text}" of open item "${s.of}"`)
+      const updated = await change($, value => applyReply(value, reply))
       // Only the closes that ticked something count.
       const closed = ticked(updated)
       if (!reply.tldr && !reply.you.length && !reply.notes.length && !closed.length) return done
