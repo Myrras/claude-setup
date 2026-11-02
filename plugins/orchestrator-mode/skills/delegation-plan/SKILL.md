@@ -13,7 +13,7 @@ State the goal and the done-criterion in 1-2 lines. Read only enough code to cut
 
 ## 2. Plan
 
-One table, one row per task (a vertical slice):
+One table, one row per vertical slice: one working, testable behaviour through every layer it needs (about 1–3 files). Never slice by layer ("all backend", "all UI"). The same small edit across many files is one slice. Do not split below one behaviour.
 
 | # | Task | Files owned | Agent | Model/effort | Wave | Depends on | Verify | Status |
 |---|------|-------------|-------|--------------|------|------------|--------|--------|
