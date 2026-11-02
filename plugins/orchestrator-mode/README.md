@@ -105,7 +105,7 @@ Measured on the first request of each subagent, Haiku, one run each. With `worke
 
 ## Enforced vs. instructed
 
-- Enforced: a PreToolUse hook blocks Edit, Write, MultiEdit and NotebookEdit in the main session. Memory, plan and scratchpad paths pass. Subagents pass (`agent_id` is set).
+- Enforced: a PreToolUse hook blocks Edit, Write, MultiEdit and NotebookEdit in the main session. Memory, plan and scratchpad paths pass on macOS/Linux and Windows. Subagents pass (`agent_id` is set).
 - Reminded: a PostToolUse hook on Bash and MCP tools counts calls per turn in the main session and, at 4 (then every 4), adds a non-blocking reminder to delegate. Resets on each user prompt and when the turn ends. Subagents are not counted. Tune with `ORCHESTRATOR_DELEGATE_AFTER`.
 - Reminded: a PreToolUse hook on Agent and Task in the main session adds a non-blocking nudge when a brief has 8 or more list items or over 4000 characters. It tells the model to split the work into vertical slices, one worktree per writer.
 - Instructed only: Bash and MCP writes, delegating long investigations, the decomposition workflow (interpret, slice, fan out, merge, review), and dispatching parallel tasks to background subagents. `ORCHESTRATOR.md` is injected at session start and tells the model to do this.

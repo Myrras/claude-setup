@@ -19,4 +19,11 @@ check "notebook denied" deny '{"tool_name":"NotebookEdit","tool_input":{"noteboo
 check "garbage fails closed" deny 'garbage'
 check "off switch passes" none '{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.php"}}' CLAUDE_ALLOW_DIRECT_EDITS=1
 
+w='USERPROFILE=C:\Users\x'
+check "win memory passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\.claude\\projects\\p\\memory\\a.md"}}' "$w"
+check "win plan passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\.claude\\plans\\a.md"}}' "$w"
+check "win scratchpad passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\AppData\\Local\\Temp\\claude\\p\\s\\scratchpad\\a.txt"}}' "$w"
+check "win project edit denied" deny '{"tool_input":{"file_path":"C:\\Users\\x\\proj\\src\\a.ts"}}' "$w"
+check "trailing CR in path passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\.claude\\plans\\a.md\r"}}' "$w"
+
 exit $fail
