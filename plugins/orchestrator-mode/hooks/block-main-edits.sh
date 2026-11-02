@@ -9,7 +9,12 @@ fi
 input=$(cat)
 field() { printf '%s' "$input" | jq -r "$1" 2>/dev/null; }
 [ -n "$(field '.agent_id // empty')" ] && exit 0
-case "$(field '.tool_input.file_path // .tool_input.notebook_path // empty')" in
+# Windows: jq ends lines with \r\n and paths are C:\... while $HOME is /c/...; normalise and also allow $USERPROFILE.
+path=$(field '.tool_input.file_path // .tool_input.notebook_path // empty' | tr -d '\r' | tr '\\' '/')
+up=$(printf '%s' "$USERPROFILE" | tr -d '\r' | tr '\\' '/')
+[ -n "$up" ] || up=$HOME
+case "$path" in
   "$HOME"/.claude/projects/*/memory/*|"$HOME"/.claude/plans/*|/private/tmp/claude-*|/tmp/claude-*) exit 0 ;;
+  "$up"/.claude/projects/*/memory/*|"$up"/.claude/plans/*|"$up"/AppData/Local/Temp/claude/*) exit 0 ;;
 esac
 printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Orchestrator mode: the main session does not edit files. Delegate this change via the Agent tool with model and effort (haiku/low trivial, sonnet/medium focused, inherit/high large), then verify the diff yourself."}}'
