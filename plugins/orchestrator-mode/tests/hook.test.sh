@@ -26,4 +26,11 @@ check "win scratchpad passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\Ap
 check "win project edit denied" deny '{"tool_input":{"file_path":"C:\\Users\\x\\proj\\src\\a.ts"}}' "$w"
 check "trailing CR in path passes" none '{"tool_input":{"file_path":"C:\\Users\\x\\.claude\\plans\\a.md\r"}}' "$w"
 
+# jq hidden: PATH holds only a copy of cat
+sh_bin=$(command -v sh); nojq=$(mktemp -d); trap 'rm -rf "$nojq"' EXIT
+src=$(command -v cat); cp "$src" "$nojq/"
+[ -f "$(dirname "$src")/msys-2.0.dll" ] && cp "$(dirname "$src")/msys-2.0.dll" "$nojq/"
+out=$(printf '{}' | PATH="$nojq" "$sh_bin" "$hook"); rc=$?
+if printf '%s' "$out" | grep -q '"permissionDecision":"deny".*jq is not installed' && [ $rc -eq 0 ]; then echo "ok   missing jq denies with jq reason"; else echo "FAIL missing jq denies with jq reason"; fail=1; fi
+
 exit $fail
