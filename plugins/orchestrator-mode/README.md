@@ -103,6 +103,10 @@ The plugin ships two lean agents for change-making slices. Both get only Read, E
 
 Measured on the first request of each subagent, Haiku, one run each. With `worker-lean` the brief must carry the project rules. Slices that need MCP, the web or skills stay on `general-purpose`.
 
+## Skills
+
+`/orchestrator-mode:delegation-plan` drafts a plan of attack: a table of tasks with files, agent, model/effort, wave and verify command. Then it asks: **Full go** (max parallelism), **Go** (wave by wave, pausing after each) or **Feedback** (change the plan first).
+
 ## Enforced vs. instructed
 
 - Enforced: a PreToolUse hook blocks Edit, Write, MultiEdit and NotebookEdit in the main session. Memory, plan and scratchpad paths pass on macOS/Linux and Windows. Subagents pass (`agent_id` is set).
