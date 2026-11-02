@@ -112,7 +112,7 @@ Measured on the first request of each subagent, Haiku, one run each. With `worke
 
 ## Requirements
 
-`jq` on PATH. Without it the hook fails closed and blocks all edits, subagents included.
+`jq` on PATH. Without it the hook fails closed and blocks all edits, subagents included. The plugin warns at session start and in the deny reason when jq is missing.
 
 ## Off switch
 

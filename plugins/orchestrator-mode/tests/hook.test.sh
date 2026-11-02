@@ -19,4 +19,11 @@ check "notebook denied" deny '{"tool_name":"NotebookEdit","tool_input":{"noteboo
 check "garbage fails closed" deny 'garbage'
 check "off switch passes" none '{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.php"}}' CLAUDE_ALLOW_DIRECT_EDITS=1
 
+# jq hidden: PATH holds only a copy of cat
+sh_bin=$(command -v sh); nojq=$(mktemp -d); trap 'rm -rf "$nojq"' EXIT
+src=$(command -v cat); cp "$src" "$nojq/"
+[ -f "$(dirname "$src")/msys-2.0.dll" ] && cp "$(dirname "$src")/msys-2.0.dll" "$nojq/"
+out=$(printf '{}' | PATH="$nojq" "$sh_bin" "$hook"); rc=$?
+if printf '%s' "$out" | grep -q '"permissionDecision":"deny".*jq is not installed' && [ $rc -eq 0 ]; then echo "ok   missing jq denies with jq reason"; else echo "FAIL missing jq denies with jq reason"; fail=1; fi
+
 exit $fail
